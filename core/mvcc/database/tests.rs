@@ -5792,6 +5792,62 @@ fn test_abandoned_commit_rolls_back_delete() {
     observer.close().unwrap();
 }
 
+#[test]
+fn test_close_of_last_connection_does_not_fsync_wal() {
+    let io = Arc::new(group_commit_sync_mode_tests::SyncCountingIo::default());
+    let db = Database::open(
+        io.clone(),
+        "close-sync-count.db",
+        crate::OpenOptions::new(Arc::new(EngineDialect)),
+    )
+    .unwrap();
+    let conn = db
+        .connect(ConnectOpts::new(SessionRole::Superuser))
+        .unwrap();
+    conn.execute("PRAGMA journal_mode = 'mvcc'").unwrap();
+    conn.execute("CREATE TABLE t(x)").unwrap();
+    conn.execute("INSERT INTO t VALUES (1)").unwrap();
+    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").unwrap();
+    conn.execute("INSERT INTO t VALUES (2)").unwrap();
+    let before = io.syncs.load(Ordering::Acquire);
+    conn.close().unwrap();
+    assert_eq!(io.syncs.load(Ordering::Acquire) - before, 0);
+}
+
+#[test]
+fn test_close_of_last_connection_fsyncs_wal_with_frames_not_in_db_file() {
+    let io = Arc::new(group_commit_sync_mode_tests::SyncCountingIo::default());
+    let opts = DatabaseOpts::new().with_experimental_mvcc_passive_checkpoint(true);
+    let db = Database::open(
+        io.clone(),
+        "close-sync-count-passive.db",
+        crate::OpenOptions::new(Arc::new(EngineDialect)).db_opts(opts),
+    )
+    .unwrap();
+    let writer = db
+        .connect(ConnectOpts::new(SessionRole::Superuser))
+        .unwrap();
+    writer.execute("PRAGMA journal_mode = 'mvcc'").unwrap();
+    writer.execute("CREATE TABLE t(x)").unwrap();
+    let reader = db
+        .connect(ConnectOpts::new(SessionRole::Superuser))
+        .unwrap();
+    reader.execute("BEGIN").unwrap();
+    reader.execute("SELECT * FROM t").unwrap();
+    writer.execute("INSERT INTO t VALUES (1)").unwrap();
+    writer.execute("PRAGMA wal_checkpoint(PASSIVE)").unwrap();
+    writer.close().unwrap();
+    reader.execute("COMMIT").unwrap();
+    let wal = reader.pager.load().wal.clone().unwrap();
+    assert!(
+        wal.get_max_frame_in_wal() > wal.backfill_frame(),
+        "the open read transaction should have kept the passive checkpoint from backfilling"
+    );
+    let before = io.syncs.load(Ordering::Acquire);
+    reader.close().unwrap();
+    assert_eq!(io.syncs.load(Ordering::Acquire) - before, 1);
+}
+
 /// Encrypted MVCC: write rows, restart with same key, verify recovery replays them.
 /// Then swap to a wrong key and verify that restart fails.
 #[test]
