@@ -1197,6 +1197,14 @@ expect {
     200
 }
 
+@setup having_t
+test having-without-group-by-with-an-aggregate-only-in-having {
+    SELECT 1 FROM t HAVING max(y) > 10;
+}
+expect {
+    1
+}
+
 test having-without-group-by-keeps-one-group-for-an-empty-table {
     CREATE TABLE e (y int);
     SELECT count(*), max(y) FROM e HAVING true;

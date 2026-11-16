@@ -7608,21 +7608,7 @@ fn update_agg_payload(
             *ovrfl_i = sum_state.ovrfl as i64;
         }
         AggFunc::Min | AggFunc::Max => {
-            if matches!(arg, Value::Null) {
-                return Ok(());
-            }
-            if matches!(payload[0], Value::Null) {
-                payload[0].try_clone_from(arg)?;
-                return Ok(());
-            }
-            use std::cmp::Ordering;
-            let cmp = collation.compare(arg.as_ref(), payload[0].as_ref());
-            let should_update = match func {
-                AggFunc::Max => cmp == Ordering::Greater,
-                AggFunc::Min => cmp == Ordering::Less,
-                _ => false,
-            };
-            if should_update {
+            if min_max_replaces_best(func, arg, &payload[0], collation) {
                 payload[0].try_clone_from(arg)?;
             }
         }
@@ -7788,6 +7774,28 @@ fn update_agg_payload(
         }
     }
     Ok(())
+}
+
+/// Whether `arg` becomes the new value of a MIN or MAX whose current value is
+/// `best`. NULL is never taken, and an equal value does not replace `best`.
+fn min_max_replaces_best(
+    func: &AggFunc,
+    arg: &Value,
+    best: &Value,
+    collation: CollationSeq,
+) -> bool {
+    if matches!(arg, Value::Null) {
+        return false;
+    }
+    if matches!(best, Value::Null) {
+        return true;
+    }
+    let cmp = collation.compare(arg.as_ref(), best.as_ref());
+    match func {
+        AggFunc::Max => cmp == std::cmp::Ordering::Greater,
+        AggFunc::Min => cmp == std::cmp::Ordering::Less,
+        _ => unreachable!("min_max_replaces_best called for {func:?}"),
+    }
 }
 
 /// Max limit of aggregate Vecs we keep around to reuse their allocations. This is a very naive
@@ -9356,6 +9364,10 @@ pub fn op_agg_step(
                             if better {
                                 *best = arg;
                             }
+                            if let Some(reg) = data.not_best_row_reg {
+                                state.registers[reg] =
+                                    Register::Value(Value::from_i64(!better as i64));
+                            }
                             state.pc += 1;
                             return Ok(InsnFunctionStepResult::Step);
                         }
@@ -9376,6 +9388,7 @@ fn op_agg_step_slow(state: &mut ProgramState, data: &AggStepData) -> InsnResult 
         delimiter,
         func,
         collation,
+        not_best_row_reg,
     } = data;
 
     if let AccumulatorFunc::Window(win_func) = func {
@@ -9465,7 +9478,14 @@ fn op_agg_step_slow(state: &mut ProgramState, data: &AggStepData) -> InsnResult 
                 .into());
             };
             let payload = agg.payload_vec_mut();
+            let is_not_best_row = not_best_row_reg.map(|_| {
+                !matches!(payload[0], Value::Null)
+                    && !min_max_replaces_best(func, arg, &payload[0], collation)
+            });
             update_agg_payload(func, arg, maybe_arg2.as_ref(), payload, collation)?;
+            if let (Some(reg), Some(is_not_best_row)) = (not_best_row_reg, is_not_best_row) {
+                state.registers[*reg] = Register::Value(Value::from_i64(is_not_best_row as i64));
+            }
         }
     };
 

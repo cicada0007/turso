@@ -581,6 +581,7 @@ fn prepare_one_select_plan(
             if plan.result_columns.len() > crate::types::MAX_COLUMN {
                 crate::bail_parse_error!("too many columns in result set");
             }
+            let result_column_aggregate_count = aggregate_expressions.len();
 
             // Parse the actual WHERE clause and add its conditions to the plan WHERE clause that already contains the join conditions.
             {
@@ -680,17 +681,26 @@ fn prepare_one_select_plan(
             // query collects them once its subqueries are planned. When there is
             // no enclosing query the move fails and the aggregate stays here.
             let tables = &plan.table_references;
+            let mut aggregate_index = 0;
+            let mut result_columns_compute_an_aggregate = false;
             plan.aggregates.retain(|agg| {
-                !(aggregate_belongs_to_enclosing_query(agg, tables)
-                    && resolver.move_aggregate_to_enclosing_query(agg.clone()))
+                let keep = !(aggregate_belongs_to_enclosing_query(agg, tables)
+                    && resolver.move_aggregate_to_enclosing_query(agg.clone()));
+                if keep && aggregate_index < result_column_aggregate_count {
+                    result_columns_compute_an_aggregate = true;
+                }
+                aggregate_index += 1;
+                keep
             });
 
-            // HAVING without GROUP BY requires aggregates in the SELECT
+            // HAVING without GROUP BY needs an aggregate query.
             if let Some(ref group_by) = plan.group_by {
-                if group_by.exprs.is_empty()
-                    && group_by.having.is_some()
-                    && plan.aggregates.is_empty()
-                {
+                let is_aggregate_query = result_columns_compute_an_aggregate
+                    || (connection
+                        .dialect()
+                        .aggregate_in_having_makes_query_aggregate()
+                        && !plan.aggregates.is_empty());
+                if group_by.exprs.is_empty() && group_by.having.is_some() && !is_aggregate_query {
                     crate::bail_parse_error!("HAVING clause on a non-aggregate query");
                 }
             }

@@ -4433,6 +4433,7 @@ impl SubqueryPosition {
             SubqueryPosition::ResultColumn
                 | SubqueryPosition::Where
                 | SubqueryPosition::GroupBy
+                | SubqueryPosition::Having
                 | SubqueryPosition::OrderBy
         )
     }

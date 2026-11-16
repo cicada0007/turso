@@ -638,4 +638,13 @@ pub trait Dialect: Send + Sync + 'static {
     fn generates_integer_primary_keys(&self) -> bool {
         true
     }
+
+    /// Whether an aggregate in HAVING makes a query without GROUP BY an
+    /// aggregate query, as in `SELECT 1 FROM t HAVING sum(a) > 0`.
+    ///
+    /// PostgreSQL does. SQLite needs an aggregate in the result columns and
+    /// otherwise raises "HAVING clause on a non-aggregate query".
+    fn aggregate_in_having_makes_query_aggregate(&self) -> bool {
+        false
+    }
 }
