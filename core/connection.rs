@@ -215,6 +215,10 @@ pub struct ReparseSchemaInner {
     /// instead of re-reading each backing table. `None` for a normal reparse,
     /// which recovers descriptors from disk in the `PopulateSequences` phase.
     preserved_sequences: Option<SequencesByNamespace>,
+    /// The sequences of the schema being replaced. A sequence read again from
+    /// disk with the same name and definition keeps its `Sequence::id`, so
+    /// the connection's `currval` of it is kept.
+    previous_sequences: SequencesByNamespace,
     /// The `sqlite_schema` scan, which also collects the indexes and
     /// materialized views that are built once the types are loaded.
     parse: Box<crate::util::ParseSchemaRowsState>,
@@ -694,8 +698,8 @@ pub struct Connection {
     /// and this is not currently centralized; each setter bumps the generation individually.
     pub(crate) prepare_context_generation: AtomicU64,
     /// Per-connection last-returned value for each sequence (for currval()),
-    /// by the database and normalized name of the sequence.
-    pub(crate) sequence_currvals: RwLock<HashMap<(usize, String), i64>>,
+    /// by the database and the [`crate::schema::Sequence::id`] of the sequence.
+    pub(crate) sequence_currvals: RwLock<HashMap<(usize, u64), i64>>,
     /// The role the session logged in as. `SET ROLE` checks against it.
     pub(crate) session_role: RoleId,
     /// The role whose privileges statements are checked against.
@@ -1586,6 +1590,7 @@ impl Connection {
         fresh.schema_version = cookie;
 
         fresh.copy_table_valued_functions(&self.schema.read());
+        let previous_sequences = self.schema.read().sequences_by_namespace();
 
         // TODO: this is hack to avoid a cyclical problem with schema reprepare
         // The problem here is that we prepare a statement here, but when the statement tries
@@ -1606,6 +1611,7 @@ impl Connection {
             _guard: guard,
             fresh,
             preserved_sequences,
+            previous_sequences,
             parse: Box::new(crate::util::ParseSchemaRowsState::new(stmt, mv_tx)),
             phase: ReparsePhase::ParseSchema,
         })
@@ -1837,7 +1843,8 @@ impl Connection {
                     let ReparseSchemaState::Building(inner) = std::mem::take(state) else {
                         unreachable!("state is Building");
                     };
-                    let fresh = inner.fresh;
+                    let mut fresh = inner.fresh;
+                    fresh.keep_sequence_ids(&inner.previous_sequences);
                     tracing::debug!(
                         "reparse_schema: schema_version={}, tables={:?}",
                         fresh.schema_version,
@@ -4054,34 +4061,28 @@ impl Connection {
             .ok_or_else(|| not_found(&seq_name))
     }
 
-    /// Record that this connection has seen a value from the named sequence (for currval).
-    pub fn set_sequence_currval(&self, database_id: usize, name: &str, value: i64) {
-        let normalized = crate::util::normalize_ident(name);
+    /// Record that this connection has seen a value from the sequence (for currval).
+    pub fn set_sequence_currval(
+        &self,
+        database_id: usize,
+        sequence: &crate::schema::Sequence,
+        value: i64,
+    ) {
         self.sequence_currvals
             .write()
-            .insert((database_id, normalized), value);
+            .insert((database_id, sequence.id), value);
     }
 
-    /// Get the last value returned by nextval/setval for the named sequence on this connection.
-    pub fn get_sequence_currval(&self, database_id: usize, name: &str) -> Option<i64> {
-        let normalized = crate::util::normalize_ident(name);
+    /// Get the last value returned by nextval/setval for the sequence on this connection.
+    pub fn get_sequence_currval(
+        &self,
+        database_id: usize,
+        sequence: &crate::schema::Sequence,
+    ) -> Option<i64> {
         self.sequence_currvals
             .read()
-            .get(&(database_id, normalized))
+            .get(&(database_id, sequence.id))
             .copied()
-    }
-
-    /// Drop this connection's currval entry for a sequence. Called on DROP
-    /// SEQUENCE (and implicit drops via DROP TABLE on AUTOINCREMENT) so that
-    /// a subsequent `CREATE SEQUENCE <same-name>` does not silently inherit
-    /// the stale per-session currval from the prior sequence — `currval()`
-    /// on the fresh sequence must error with "not yet defined in this
-    /// session" until a nextval/setval establishes it.
-    pub fn clear_sequence_currval(&self, database_id: usize, name: &str) {
-        let normalized = crate::util::normalize_ident(name);
-        self.sequence_currvals
-            .write()
-            .remove(&(database_id, normalized));
     }
 
     /// Drop this connection's currval entries for every sequence.
@@ -4090,8 +4091,8 @@ impl Connection {
     }
 
     /// Drop this connection's currval entries of every sequence of a
-    /// database. Called on DETACH, since the next ATTACH can get the same
-    /// database id.
+    /// database. Called on DETACH, after which no sequence of that database
+    /// can be used again: attaching it again reads new sequences from disk.
     pub(crate) fn clear_sequence_currvals_of_database(&self, database_id: usize) {
         self.sequence_currvals
             .write()
