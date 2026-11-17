@@ -141,7 +141,7 @@ pub(crate) fn step_view_delta_batch(
     state: &mut ViewDeltaApplyState,
     rollback: bool,
     pager: &Arc<Pager>,
-    scope: StatementScope,
+    scope: &mut StatementScope,
 ) -> Result<IOResult<()>> {
     loop {
         match state {
@@ -238,7 +238,7 @@ pub(crate) fn step_view_delta_batch(
                 }
 
                 let statement = stmt.as_mut().expect("maintenance statement was just built");
-                match statement.step_subprogram(scope)? {
+                match statement.step_subprogram(scope.share(pager.io.as_ref(), connection))? {
                     StepResult::Done => {
                         *stmt = None;
                         *current_index += 1;
@@ -3068,13 +3068,12 @@ impl Program {
         rollback: bool,
         pager: &Arc<Pager>,
     ) -> Result<IOResult<()>> {
-        let scope = state.scope.share(pager.io.as_ref(), &self.connection);
         match step_view_delta_batch(
             &self.connection,
             &mut state.view_delta_state,
             rollback,
             pager,
-            scope,
+            &mut state.scope,
         )? {
             IOResult::IO(io) => Ok(IOResult::IO(io)),
             IOResult::Done(()) => {

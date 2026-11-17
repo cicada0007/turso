@@ -73,7 +73,7 @@ impl MaterializedViewCursor {
             &mut self.view_delta_state,
             false,
             &self.pager,
-            self.scope,
+            &mut self.scope,
         )? {
             IOResult::IO(io) => Ok(IOResult::IO(io)),
             IOResult::Done(()) => {
