@@ -1,8 +1,8 @@
 # Step 3a of #11314: PostgreSQL's clock
 
-Status: implemented with this doc. The rest of step 3 (argument types for dialect functions;
-`extract`, `date_part`, `date_trunc`, `to_char` of dates, `make_date`, `pg_typeof`; and
-`'now'`, `'today'`, `'tomorrow'`, `'yesterday'` as input) is step 3b, designed with its own PR.
+Status: step 3a is implemented. Step 3b (`extract`, `date_part`, `date_trunc`, `make_date`) is
+implemented as the last section describes. `to_char` of dates, `pg_typeof` and `'now'`, `'today'`,
+`'tomorrow'`, `'yesterday'` as input remain.
 
 ## TLDR
 
@@ -306,3 +306,71 @@ user-visible result; a second review followed. What changed this step's design:
 - **The time extension is off in tursopg**, instead of shadowing `make_date`: the cause is that
   every time-extension function resolved in tursopg, so `make_timestamp` and `to_timestamp`
   stop returning bytes too.
+
+## Step 3b: `extract`, `date_trunc`, `make_date`
+
+```sql
+SELECT extract(second FROM timestamp '2024-01-05 10:00:15.5') + 1;  -- 16.500000 (numeric)
+SELECT date_trunc('day', date '2024-01-05');                        -- 2024-01-05 00:00:00+00
+SELECT make_date(2024, 2, 29);                                      -- 2024-02-29
+SELECT date_part('year', date '2024-01-05');                        -- error 0A000
+```
+
+### Result types that depend on the arguments
+
+`date_trunc` returns the type of its argument, and each function must refuse arguments
+they cannot read correctly before the statement runs. A native function had one fixed result
+type, chosen when it was registered, so core gets one new hook:
+
+- `ExternalFunc::choosing_result_type(fn(&[ArgumentType]) -> Result<ReturnType>)`.
+  `ArgumentType` is `StringLiteral` (only a string literal itself), `Unknown` (NULL, a
+  parameter, or an expression of string literals such as `CASE WHEN c THEN 'day' END`) or
+  `Typed(name)`, where the name has domains removed. The function's `ResultType` is then
+  `ChosenFromArgumentTypes(choose)`, so every reader of `ResultType` must handle it.
+  Translation calls it before it emits the call, so its error is the
+  statement's error; `type_of` calls it for the expression's type and treats an error as
+  `Unknown`, the type translation then reports the error for. The STRICT CHECK checker refuses
+  the call, since its own typer types a string literal as text (#11902).
+- The function body still receives the values. With `receiving_argument_types()` it also
+  receives each argument's type name, which `extract` and `date_trunc` need to read a stored
+  value. A custom type's operator passes only the operands, so it names a core `ScalarFunc`
+  (`OperatorSignature::func`), never an external function.
+
+SQLite functions have no result types, but SQLite checks the arguments of a call while it
+compiles the statement in the same way: `resolveExprStep` (src/resolve.c:1179-1196) finds the
+function by name and argument count, and refuses `unlikely(x, y)` when `y` is not a constant
+between 0.0 and 1.0. The hook runs where Turso translates the call, which is later, so a call
+is not checked until it is compiled (#11935). The select list of an `EXISTS` subquery, which
+the planner drops, is never checked. A view and a column `DEFAULT` are checked when they are
+used, not when they are created.
+
+### Values
+
+Arguments are read with step 1's `Temporal::read_stored(text, type)` and results written with
+`Temporal::to_text()`, so there is one parser and one formatter for the stored form. A stored
+value that does not parse is an error. `extract` returns `numeric` text with PostgreSQL's scale:
+6 for `second` and `epoch` (0 for the epoch of a date), 3 for `milliseconds`, else 0.
+
+### Units
+
+As in PostgreSQL's `timestamp_part_common`, `time_part_common`, `extract_date` and
+`timestamp_trunc`: the unit is lowercased and compared on its first 10 characters, `extract`
+looks in the interval units and then in the date words, and `date_trunc` only in the interval
+units. The errors are PostgreSQL's: `0A000 unit "hour" not supported for type date` for a unit
+the type has no field for, and `22023 unit "foo" not recognized for type date` for an unknown
+one.
+
+### Refused with `0A000`
+
+- `date_part`: its result is `double precision`, which tursopg prints differently (#10695).
+  `PostgresDialect::resolve_function` refuses the name, as it would refuse any function it
+  doesn't have, but with 0A000 instead of 42883.
+- An argument that is a string constant, NULL or parameter: PostgreSQL picks the type from the
+  context, which tursopg doesn't do. A `date_trunc` unit that is not a string constant.
+- The fields `julian` and `timezone*`, and `date_trunc` of a `time` (PostgreSQL returns an
+  `interval`).
+- Results outside years 1 to 9999, which the stored form cannot hold: `make_date` of years BC or
+  after 9999, and `date_trunc('decade')` of years 1 to 9. Arguments that are out of range in
+  PostgreSQL too get PostgreSQL's `22008` error.
+
+tursodb gets none of these functions.
