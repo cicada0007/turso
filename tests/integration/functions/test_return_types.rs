@@ -3,6 +3,7 @@
 //!
 //! The list of functions comes from `Func::builtin_function_list`, which walks
 //! the function enums, so a new function is checked as soon as it is added.
+//! It lists the functions SQLite-dialect SQL can call.
 
 use crate::common::TempDatabase;
 use turso_core::native_ext::ReturnType;
@@ -17,7 +18,7 @@ fn results_have_the_declared_return_type(tmp_db: TempDatabase) {
     let mut checked_calls = 0;
     let mut wrong = Vec::new();
 
-    for entry in Func::builtin_function_list() {
+    for entry in Func::builtin_function_list(conn.dialect().as_ref()).unwrap() {
         if entry.func_type != "s" {
             continue;
         }

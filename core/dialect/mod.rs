@@ -332,6 +332,14 @@ pub trait Dialect: Send + Sync + 'static {
         engine::resolve_builtin_function(name, arg_count)
     }
 
+    /// Engine scalar functions this dialect calls by names the engine's
+    /// function list does not have, such as PostgreSQL's
+    /// `transaction_timestamp()` for `now()`. [`Dialect::resolve_function`]
+    /// must resolve each of them; PRAGMA function_list lists them.
+    fn function_names(&self) -> &'static [(&'static str, ScalarFunc)] {
+        &[]
+    }
+
     /// Run built-in scalar function `func` on the registers that hold its
     /// arguments.
     ///

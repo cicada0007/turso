@@ -272,6 +272,16 @@ expect {
     iif|-1
 }
 
+# The engine has these PostgreSQL clock functions, but SQLite SQL can't call
+# them.
+test pragma-function-list-omits-postgresql-clock-functions {
+    SELECT count(*) FROM pragma_function_list
+    WHERE name IN ('transaction_timestamp', 'statement_timestamp', 'clock_timestamp');
+}
+expect {
+    0
+}
+
 test pragma-function-list-scalar {
     SELECT name, builtin, type, enc, narg, flags FROM pragma_function_list WHERE name = 'upper';
 }

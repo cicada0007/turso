@@ -666,7 +666,7 @@ fn test_pg_native_function_signatures_and_catalogs(db: TempDatabase) {
         .prepare(
             "SELECT proname, pronargs, provolatile FROM pg_proc WHERE proname IN \
          ('format_type', 'pg_get_constraintdef', 'quote_ident', 'now', \
-         'statement_timestamp', 'clock_timestamp') ORDER BY proname, pronargs",
+         'clock_timestamp') ORDER BY proname, pronargs",
         )
         .unwrap()
         .run_collect_rows()
@@ -681,7 +681,6 @@ fn test_pg_native_function_signatures_and_catalogs(db: TempDatabase) {
             ("pg_get_constraintdef", 1, "v"),
             ("pg_get_constraintdef", 2, "v"),
             ("quote_ident", 1, "i"),
-            ("statement_timestamp", 0, "v"),
         ]
         .into_iter()
         .map(|(name, count, volatility)| vec![

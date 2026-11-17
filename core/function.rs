@@ -2064,10 +2064,50 @@ impl Func {
         crate::dialect::engine::resolve_builtin_function_name(name, arg_count)
     }
 
-    /// Returns a list of all built-in functions for PRAGMA function_list.
-    /// Derives the list from enum iteration so it stays in sync automatically.
-    /// Functions with multiple valid arities get one row per arity.
-    pub fn builtin_function_list() -> Vec<FunctionListEntry> {
+    /// The built-in functions that SQL in `dialect` can call, for PRAGMA
+    /// function_list and pg_proc. Functions with multiple valid arities get
+    /// one row per arity.
+    ///
+    /// A function is listed only when the dialect resolves it, because the
+    /// function enums also hold functions that only some dialects have, such
+    /// as `statement_timestamp()`.
+    pub fn builtin_function_list(
+        dialect: &dyn crate::Dialect,
+    ) -> Result<Vec<FunctionListEntry>, LimboError> {
+        let dialect_names = dialect.function_names().iter().flat_map(|(name, func)| {
+            func.arities().iter().map(|&narg| FunctionListEntry {
+                name: name.to_string(),
+                func_type: "s",
+                narg,
+                deterministic: func.is_deterministic(),
+            })
+        });
+        let mut listed: Vec<FunctionListEntry> = Vec::new();
+        for entry in Self::engine_function_list()
+            .into_iter()
+            .chain(dialect_names)
+        {
+            let arg_count = match entry.narg {
+                // Every function that takes any number of arguments takes
+                // two: concat_ws() needs two, and max() and min() with fewer
+                // are the aggregates.
+                -1 => 2,
+                narg => usize::try_from(narg).expect("a function's narg is -1 or a count"),
+            };
+            // A dialect's own name can also be an engine name, as
+            // statement_timestamp is in PostgreSQL.
+            if dialect.resolve_function(&entry.name, arg_count)?.is_some()
+                && !listed.contains(&entry)
+            {
+                listed.push(entry);
+            }
+        }
+        Ok(listed)
+    }
+
+    /// One row per arity of every function in the function enums, under the
+    /// engine's name for it.
+    fn engine_function_list() -> Vec<FunctionListEntry> {
         let mut funcs = Vec::new();
 
         // Helper: push one entry per arity for a function
@@ -2150,6 +2190,7 @@ impl Func {
     }
 }
 
+#[derive(Debug, PartialEq)]
 pub struct FunctionListEntry {
     pub name: String,
     pub func_type: &'static str, // "s" = scalar, "a" = aggregate, "w" = window
