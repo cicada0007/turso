@@ -1087,7 +1087,7 @@ fn query_pragma(
             const SQLITE_INNOCUOUS: i64 = 0x200000;
 
             // Built-in functions
-            for entry in Func::builtin_function_list(connection.dialect().as_ref())? {
+            for entry in Func::builtin_function_list() {
                 let mut flags: i64 = 0;
                 if entry.deterministic {
                     flags |= SQLITE_DETERMINISTIC;

@@ -10390,18 +10390,18 @@ pub fn op_function(
             state.registers[*dest].set_null();
         }
         crate::function::Func::Scalar(scalar_func) => {
-            let clock = StatementClock::new(pager.io.as_ref(), &mut state.scope.current_time);
-            let context = ScalarFuncContext {
-                connection: &program.connection,
-                io: pager.io.as_ref(),
-                clock: &clock,
-                statement_times: Cell::from_mut(&mut state.scope.statement_times),
-                collation: func.collation,
-            };
-            let value = program.connection.dialect().call_scalar(
-                &context,
-                scalar_func,
-                &state.registers[*start_reg..*start_reg + arg_count],
+            let value = with_scalar_context(
+                &program.connection,
+                pager.io.as_ref(),
+                &mut state.scope,
+                func.collation,
+                |context| {
+                    program.connection.dialect().call_scalar(
+                        context,
+                        scalar_func,
+                        &state.registers[*start_reg..*start_reg + arg_count],
+                    )
+                },
             )?;
             state.registers[*dest].set_value(value);
         }
@@ -10465,10 +10465,16 @@ pub fn op_function(
         crate::function::Func::External(f) => {
             let value = return_if_io!(
                 state,
-                f.func.call_scalar(
-                    &mut state.extension_state,
+                with_scalar_context(
                     &program.connection,
-                    &state.registers[*start_reg..*start_reg + arg_count],
+                    pager.io.as_ref(),
+                    &mut state.scope,
+                    func.collation,
+                    |context| f.func.call_scalar(
+                        &mut state.extension_state,
+                        context,
+                        &state.registers[*start_reg..*start_reg + arg_count],
+                    ),
                 )
             );
             state.registers[*dest].set_value(value);
@@ -11277,6 +11283,25 @@ pub fn op_function(
     state.registers[*dest].get_value().check_length_limit()?;
     state.pc += 1;
     Ok(InsnFunctionStepResult::Step)
+}
+
+/// Calls `call` with what a scalar function may read besides its arguments.
+fn with_scalar_context<T>(
+    connection: &Arc<Connection>,
+    io: &dyn crate::IO,
+    scope: &mut crate::vdbe::StatementScope,
+    collation: CollationSeq,
+    call: impl FnOnce(&ScalarFuncContext<'_>) -> T,
+) -> T {
+    let clock = StatementClock::new(io, &mut scope.current_time);
+    let context = ScalarFuncContext {
+        connection,
+        io,
+        clock: &clock,
+        statement_times: Cell::from_mut(&mut scope.statement_times),
+        collation,
+    };
+    call(&context)
 }
 
 /// The clock seen by the date and time functions. Like SQLite's

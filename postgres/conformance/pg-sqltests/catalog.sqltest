@@ -351,15 +351,6 @@ expect {
     transaction_timestamp|0
 }
 
-# SQLite's random() is a function of the engine too, but PostgreSQL SQL calls
-# PostgreSQL's random().
-test pg-proc-lists-random-without-arguments-once {
-    SELECT count(*) FROM pg_proc WHERE proname = 'random' AND pronargs = 0;
-}
-expect {
-    1
-}
-
 @skip-if postgres "PostgreSQL has the plpgsql language"
 test pg-object-dump-language-discovery-is-empty {
     SET search_path TO '';

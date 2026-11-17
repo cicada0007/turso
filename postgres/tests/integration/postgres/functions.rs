@@ -645,14 +645,14 @@ fn test_pg_native_function_signatures_and_catalogs(db: TempDatabase) {
     assert_eq!(
         rows,
         [
-            ("clock_timestamp", 0, 2097152),
+            ("clock_timestamp", 0, 0),
             ("format_type", 1, 2048),
             ("format_type", 2, 2048),
             ("now", 0, 2097152),
             ("pg_get_constraintdef", 1, 0),
             ("pg_get_constraintdef", 2, 0),
             ("quote_ident", 1, 2048),
-            ("statement_timestamp", 0, 2097152),
+            ("statement_timestamp", 0, 0),
         ]
         .into_iter()
         .map(|(name, count, flags)| vec![

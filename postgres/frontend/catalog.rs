@@ -18,7 +18,7 @@ use turso_core::{
     },
     security::roles::RoleId,
     walk_expr_mut, Connection, Dialect, Func, IOResult, LimboError, NamespaceId, NamespaceRef,
-    OpenOptions, Result, ScalarFunc, Statement, Value, WalkControl, MAIN_DB_ID,
+    OpenOptions, Result, Statement, Value, WalkControl, MAIN_DB_ID,
 };
 use turso_ext::{ConstraintInfo, IndexInfo, OrderByInfo, ResultCode, VTabKind};
 use turso_parser::ast::{self, RefAct, SortOrder};
@@ -232,23 +232,10 @@ impl Dialect for PostgresDialect {
             return Ok(None);
         }
         // CURRENT_TIMESTAMP and the other time keywords read now().
-        let clock_function = if turso_pg_parser::translator::is_time_keyword_function(name) {
-            Some(ScalarFunc::Now)
-        } else {
-            CLOCK_FUNCTIONS
-                .iter()
-                .find(|(clock_name, _)| name.eq_ignore_ascii_case(clock_name))
-                .map(|(_, func)| func.clone())
-        };
-        if let Some(func) = clock_function {
-            turso_core::dialect::engine::check_scalar_arity(&func, name, arg_count)?;
-            return Ok(Some(Func::Scalar(func)));
+        if turso_pg_parser::translator::is_time_keyword_function(name) {
+            return turso_core::dialect::engine::resolve_builtin_function("now", arg_count);
         }
         turso_core::dialect::engine::resolve_builtin_function(name, arg_count)
-    }
-
-    fn function_names(&self) -> &'static [(&'static str, ScalarFunc)] {
-        &CLOCK_FUNCTIONS
     }
 
     fn requires_custom_types(&self) -> bool {
@@ -425,14 +412,6 @@ impl Dialect for PostgresDialect {
         true
     }
 }
-
-/// PostgreSQL's clock functions besides now(), which the engine has for both
-/// dialects.
-static CLOCK_FUNCTIONS: [(&str, ScalarFunc); 3] = [
-    ("transaction_timestamp", ScalarFunc::Now),
-    ("statement_timestamp", ScalarFunc::StatementTimestamp),
-    ("clock_timestamp", ScalarFunc::ClockTimestamp),
-];
 
 pub fn encode_pg_schema_sql(sql: &str) -> String {
     format!("{POSTGRES_TABLE_SQL_PREFIX}{sql}")
@@ -1305,9 +1284,7 @@ impl SnapshotRows for PgProcTable {
         let mut oid = 1i64;
 
         // Built-in functions from the same registry as PRAGMA function_list
-        let builtin_functions = Func::builtin_function_list(conn.dialect().as_ref())
-            .expect("every listed function resolves with the arguments it is listed with");
-        for entry in builtin_functions {
+        for entry in Func::builtin_function_list() {
             let prokind = match entry.func_type {
                 "a" => "a", // aggregate
                 "w" => "w", // window

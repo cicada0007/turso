@@ -1814,8 +1814,9 @@ expect @postgres error {
 test transaction-timestamp-with-arguments-errors {
     SELECT transaction_timestamp(1, 2, 3);
 }
+@sqlstate 42883
 expect error {
-    wrong number of arguments to function transaction_timestamp\(\)
+    no such function: transaction_timestamp
 }
 @sqlstate 42883
 expect @postgres error {
@@ -1825,8 +1826,9 @@ expect @postgres error {
 test statement-timestamp-with-an-argument-errors {
     SELECT statement_timestamp(1);
 }
+@sqlstate 42883
 expect error {
-    wrong number of arguments to function statement_timestamp\(\)
+    no such function: statement_timestamp
 }
 @sqlstate 42883
 expect @postgres error {
@@ -1836,8 +1838,9 @@ expect @postgres error {
 test clock-timestamp-with-an-argument-errors {
     SELECT clock_timestamp(1);
 }
+@sqlstate 42883
 expect error {
-    wrong number of arguments to function clock_timestamp\(\)
+    no such function: clock_timestamp
 }
 @sqlstate 42883
 expect @postgres error {

@@ -120,8 +120,17 @@ fn native_scalar_borrows_the_same_registers_across_io() {
     )
     .unwrap();
     let mut state = turso_core::native_ext::ExtensionState::None;
+    let io = conn.get_pager().io.clone();
+    let statement_times = std::cell::Cell::new(None);
+    let context = ScalarFuncContext {
+        connection: &conn,
+        io: io.as_ref(),
+        clock: io.as_ref(),
+        statement_times: &statement_times,
+        collation: turso_core::CollationSeq::BINARY,
+    };
     let value = finish(&queue, || {
-        function.func.call_scalar(&mut state, &conn, &args)
+        function.func.call_scalar(&mut state, &context, &args)
     });
     assert_eq!(value, Value::from_i64(73));
     assert!(matches!(
@@ -249,7 +258,8 @@ struct ConnectionContextCall {
 impl ScalarCall for ConnectionContextCall {
     type Output = Value;
 
-    fn step(&mut self, connection: &Arc<Connection>, args: &[Register]) -> IOResultOr<Value> {
+    fn step(&mut self, context: &ScalarFuncContext<'_>, args: &[Register]) -> IOResultOr<Value> {
+        let connection = context.connection;
         if integer(args[0].get_value()) == 0 {
             let context = connection.context::<AtomicI64>().ok_or_else(|| {
                 LimboError::ExtensionError("connection context is required".into())
@@ -582,7 +592,7 @@ struct GatedSevenCall {
 impl ScalarCall for GatedSevenCall {
     type Output = Value;
 
-    fn step(&mut self, _connection: &Arc<Connection>, _args: &[Register]) -> IOResultOr<Value> {
+    fn step(&mut self, _context: &ScalarFuncContext<'_>, _args: &[Register]) -> IOResultOr<Value> {
         if let Some(io) = self.gate.wait() {
             return Ok(IOResult::IO(io));
         }
@@ -615,7 +625,7 @@ struct RegisterProbeCall {
 impl ScalarCall for RegisterProbeCall {
     type Output = Value;
 
-    fn step(&mut self, _connection: &Arc<Connection>, args: &[Register]) -> IOResultOr<Value> {
+    fn step(&mut self, _context: &ScalarFuncContext<'_>, args: &[Register]) -> IOResultOr<Value> {
         assert_eq!(args.as_ptr() as usize, self.args_address);
         if let Some(io) = self.gate.wait() {
             return Ok(IOResult::IO(io));
@@ -640,7 +650,8 @@ impl ScalarFunction for ConnectionChanges {
 impl ScalarCall for ConnectionChanges {
     type Output = Value;
 
-    fn step(&mut self, connection: &Arc<Connection>, args: &[Register]) -> IOResultOr<Value> {
+    fn step(&mut self, context: &ScalarFuncContext<'_>, args: &[Register]) -> IOResultOr<Value> {
+        let connection = context.connection;
         Ok(IOResult::Done(Value::from_i64(
             connection.changes() * 10 + integer(args[0].get_value()),
         )))
@@ -661,7 +672,7 @@ impl ScalarFunction for Nine {
 impl ScalarCall for Nine {
     type Output = i64;
 
-    fn step(&mut self, _connection: &Arc<Connection>, _args: &[Register]) -> IOResultOr<i64> {
+    fn step(&mut self, _context: &ScalarFuncContext<'_>, _args: &[Register]) -> IOResultOr<i64> {
         Ok(IOResult::Done(9))
     }
 }
@@ -682,7 +693,7 @@ struct NullToNineCall;
 impl ScalarCall for NullToNineCall {
     type Output = Value;
 
-    fn step(&mut self, _connection: &Arc<Connection>, args: &[Register]) -> IOResultOr<Value> {
+    fn step(&mut self, _context: &ScalarFuncContext<'_>, args: &[Register]) -> IOResultOr<Value> {
         Ok(IOResult::Done(match args[0].get_value() {
             Value::Null => Value::from_i64(9),
             value => value.clone(),
@@ -705,7 +716,7 @@ impl ScalarFunction for Pause {
 impl ScalarCall for Pause {
     type Output = i64;
 
-    fn step(&mut self, _connection: &Arc<Connection>, _args: &[Register]) -> IOResultOr<i64> {
+    fn step(&mut self, _context: &ScalarFuncContext<'_>, _args: &[Register]) -> IOResultOr<i64> {
         std::thread::sleep(std::time::Duration::from_millis(5));
         Ok(IOResult::Done(0))
     }
@@ -2182,7 +2193,7 @@ struct DelayedCall {
 impl ScalarCall for DelayedCall {
     type Output = Value;
 
-    fn step(&mut self, _connection: &Arc<Connection>, args: &[Register]) -> IOResultOr<Value> {
+    fn step(&mut self, _context: &ScalarFuncContext<'_>, args: &[Register]) -> IOResultOr<Value> {
         if let Some(io) = self.gate.wait() {
             return Ok(IOResult::IO(io));
         }
@@ -2228,7 +2239,8 @@ struct NestedSumCall {
 impl ScalarCall for NestedSumCall {
     type Output = Value;
 
-    fn step(&mut self, connection: &Arc<Connection>, args: &[Register]) -> IOResultOr<Value> {
+    fn step(&mut self, context: &ScalarFuncContext<'_>, args: &[Register]) -> IOResultOr<Value> {
+        let connection = context.connection;
         if self.statement.is_none() {
             self.statement = Some(connection.prepare_internal("SELECT x FROM input_values")?);
         }

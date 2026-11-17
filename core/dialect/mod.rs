@@ -135,9 +135,11 @@ pub struct OwnerColumn {
     pub column: String,
 }
 
-/// What a built-in scalar function may read besides its arguments.
+/// What a scalar function may read besides its arguments. Built-in and native
+/// functions get the same one, as every SQLite function gets a
+/// `sqlite3_context`.
 pub struct ScalarFuncContext<'a> {
-    pub connection: &'a Connection,
+    pub connection: &'a Arc<Connection>,
     pub io: &'a dyn IO,
     /// The statement's clock: every function of one step sees the same time.
     pub clock: &'a dyn Clock,
@@ -357,15 +359,6 @@ pub trait Dialect: Send + Sync + 'static {
     /// always resolve with SQLite semantics instead.
     fn resolve_function(&self, name: &str, arg_count: usize) -> Result<Option<Func>> {
         engine::resolve_builtin_function(name, arg_count)
-    }
-
-    /// Engine scalar functions this dialect resolves by its own rule, under
-    /// these names, such as PostgreSQL's `transaction_timestamp()` for
-    /// `now()`. [`Dialect::resolve_function`] must resolve each name to its
-    /// function. PRAGMA function_list describes these names from this list,
-    /// not from the engine's.
-    fn function_names(&self) -> &'static [(&'static str, ScalarFunc)] {
-        &[]
     }
 
     /// Run built-in scalar function `func` on the registers that hold its

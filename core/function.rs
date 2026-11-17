@@ -8,7 +8,7 @@ use turso_ext::{
 };
 
 use crate::translate::collate::{CollationSeq, TextCollation};
-use crate::{turso_assert, LimboError};
+use crate::LimboError;
 
 pub type ContextCollationFunction = unsafe extern "C" fn(
     context: usize,
@@ -1003,10 +1003,9 @@ pub enum ScalarFunc {
     SqliteSourceId,
     UnixEpoch,
     JulianDay,
-    /// PostgreSQL's `now()` and `transaction_timestamp()`.
+    /// `now()`: when the transaction began, as in PostgreSQL. A statement in
+    /// autocommit is its own transaction.
     Now,
-    StatementTimestamp,
-    ClockTimestamp,
     Hex,
     Unhex,
     GetByte,
@@ -1143,7 +1142,7 @@ impl Deterministic for ScalarFunc {
             ScalarFunc::SqliteSourceId => false,
             ScalarFunc::UnixEpoch => false,
             ScalarFunc::JulianDay => false,
-            ScalarFunc::Now | ScalarFunc::StatementTimestamp | ScalarFunc::ClockTimestamp => false,
+            ScalarFunc::Now => false,
             ScalarFunc::Hex => true,
             ScalarFunc::Unhex => true,
             ScalarFunc::GetByte => true,
@@ -1284,9 +1283,7 @@ impl ScalarFunc {
             #[cfg(feature = "test_helper")]
             Self::TestNondetCounter => ResultType::Declared(ReturnType::Integer),
             Self::JulianDay => ResultType::Declared(ReturnType::Real),
-            Self::Now | Self::StatementTimestamp | Self::ClockTimestamp => {
-                ResultType::Declared(ReturnType::Custom("timestamptz"))
-            }
+            Self::Now => ResultType::Declared(ReturnType::Custom("timestamptz")),
             Self::Char
             | Self::Concat
             | Self::ConcatWs
@@ -1411,10 +1408,8 @@ impl Display for ScalarFunc {
             Self::TursoVersion => "turso_version",
             Self::SqliteSourceId => "sqlite_source_id",
             Self::JulianDay => "julianday",
-            Self::UnixEpoch => "unixepoch",
             Self::Now => "now",
-            Self::StatementTimestamp => "statement_timestamp",
-            Self::ClockTimestamp => "clock_timestamp",
+            Self::UnixEpoch => "unixepoch",
             Self::Hex => "hex",
             Self::Unhex => "unhex",
             Self::GetByte => "get_byte",
@@ -1529,10 +1524,8 @@ impl ScalarFunc {
             | Self::SqliteVersion
             | Self::TursoVersion
             | Self::SqliteSourceId
-            | Self::TotalChanges
             | Self::Now
-            | Self::StatementTimestamp
-            | Self::ClockTimestamp => &[0],
+            | Self::TotalChanges => &[0],
             #[cfg(feature = "test_helper")]
             Self::TestNondetCounter => &[0],
             // 1-arg
@@ -2065,93 +2058,37 @@ impl Func {
         crate::dialect::engine::resolve_builtin_function_name(name, arg_count)
     }
 
-    /// The built-in functions that SQL in `dialect` can call, for PRAGMA
-    /// function_list and pg_proc. Functions with multiple valid arities get
-    /// one row per arity.
-    ///
-    /// A function is listed only when the dialect resolves it, because the
-    /// function enums also hold functions that only some dialects have, such
-    /// as `statement_timestamp()`. A name in [`crate::Dialect::function_names`]
-    /// is described by the dialect's row, not the engine's.
-    pub fn builtin_function_list(
-        dialect: &dyn crate::Dialect,
-    ) -> Result<Vec<FunctionListEntry>, LimboError> {
-        let dialect_names = dialect.function_names();
-        let mut listed: Vec<FunctionListEntry> = Vec::new();
-        for (entry, func) in Self::engine_function_list() {
-            if dialect_names
-                .iter()
-                .any(|(name, _)| name.eq_ignore_ascii_case(&entry.name))
-            {
-                continue;
-            }
-            let Some(resolved) = dialect.resolve_function(&entry.name, entry.probe_arg_count())?
-            else {
-                continue;
-            };
-            turso_assert!(
-                Self::is_same_builtin(&func, &resolved),
-                "a dialect resolves an engine function's name to that function or lists the name in its function_names",
-                { "name": entry.name, "narg": entry.narg }
-            );
-            listed.push(entry);
-        }
-        for (name, func) in dialect_names {
-            for &narg in func.arities() {
-                let entry = FunctionListEntry {
-                    name: name.to_string(),
-                    func_type: "s",
-                    narg,
-                    deterministic: func.is_deterministic(),
-                };
-                let resolved = dialect.resolve_function(name, entry.probe_arg_count())?;
-                turso_assert!(
-                    matches!(&resolved, Some(Func::Scalar(resolved)) if resolved == func),
-                    "a dialect resolves every name in its function_names to its function",
-                    { "name": name, "narg": narg }
-                );
-                listed.push(entry);
-            }
-        }
-        Ok(listed)
-    }
-
-    /// One row per arity of every function in the function enums, under the
-    /// engine's name for it, with the function the row describes.
-    fn engine_function_list() -> Vec<(FunctionListEntry, Func)> {
+    /// Returns a list of all built-in functions for PRAGMA function_list.
+    /// Derives the list from enum iteration so it stays in sync automatically.
+    /// Functions with multiple valid arities get one row per arity.
+    pub fn builtin_function_list() -> Vec<FunctionListEntry> {
         let mut funcs = Vec::new();
 
         // Helper: push one entry per arity for a function
-        let mut push =
-            |func: Func, name: String, func_type: &'static str, arities: &[i32], det: bool| {
-                for &narg in arities {
-                    funcs.push((
-                        FunctionListEntry {
-                            name: name.clone(),
-                            func_type,
-                            narg,
-                            deterministic: det,
-                        },
-                        func.clone(),
-                    ));
-                }
-            };
+        let mut push = |name: String, func_type: &'static str, arities: &[i32], det: bool| {
+            for &narg in arities {
+                funcs.push(FunctionListEntry {
+                    name: name.clone(),
+                    func_type,
+                    narg,
+                    deterministic: det,
+                });
+            }
+        };
 
         // Scalar functions (filter out internal-only variants)
         for f in ScalarFunc::iter() {
             if f.is_internal() {
                 continue;
             }
-            let (name, arities, det) = (f.to_string(), f.arities(), f.is_deterministic());
-            push(Func::Scalar(f), name, "s", arities, det);
+            push(f.to_string(), "s", f.arities(), f.is_deterministic());
         }
 
         // Aggregate functions (External is #[strum(disabled)], skipped automatically).
         // SQLite reports built-in aggregates as "w" (window-capable) since they
         // can all be used with OVER clauses.
         for f in AggFunc::iter() {
-            let (name, arities, det) = (f.to_string(), f.arities(), f.is_deterministic());
-            push(Func::Agg(f), name, "w", arities, det);
+            push(f.to_string(), "w", f.arities(), f.is_deterministic());
         }
 
         // Window functions (skip stub variants until they're wired up).
@@ -2159,20 +2096,17 @@ impl Func {
             if !f.is_implemented() {
                 continue;
             }
-            let (name, arities, det) = (f.to_string(), f.arities(), f.is_deterministic());
-            push(Func::Window(f), name, "w", arities, det);
+            push(f.to_string(), "w", f.arities(), f.is_deterministic());
         }
 
         // Math functions (all scalar)
         for f in MathFunc::iter() {
-            let (name, arities, det) = (f.to_string(), f.arities(), f.is_deterministic());
-            push(Func::Math(f), name, "s", arities, det);
+            push(f.to_string(), "s", f.arities(), f.is_deterministic());
         }
 
         // Vector functions (all scalar)
         for f in VectorFunc::iter() {
-            let (name, arities, det) = (f.to_string(), f.arities(), f.is_deterministic());
-            push(Func::Vector(f), name, "s", arities, det);
+            push(f.to_string(), "s", f.arities(), f.is_deterministic());
         }
 
         // JSON functions (feature-gated, filter out operator-style entries)
@@ -2181,207 +2115,38 @@ impl Func {
             if f.is_internal() {
                 continue;
             }
-            let (name, arities, det) = (f.to_string(), f.arities(), f.is_deterministic());
-            push(Func::Json(f), name, "s", arities, det);
+            push(f.to_string(), "s", f.arities(), f.is_deterministic());
         }
 
         // FTS functions (feature-gated)
         #[cfg(all(feature = "fts", not(target_family = "wasm")))]
         for f in FtsFunc::iter() {
-            let (name, arities, det) = (f.to_string(), f.arities(), f.is_deterministic());
-            push(Func::Fts(f), name, "s", arities, det);
+            push(f.to_string(), "s", f.arities(), f.is_deterministic());
         }
 
         // Aliases: functions callable under multiple names.
         // These are additional names that resolve_function() accepts
         // but that map to existing enum variants.
-        push(
-            Func::Scalar(ScalarFunc::Printf),
-            "format".into(),
-            "s",
-            &[-1],
-            true,
-        );
-        push(Func::Scalar(ScalarFunc::Iif), "if".into(), "s", &[-1], true);
+        funcs.push(FunctionListEntry {
+            name: "format".into(),
+            func_type: "s",
+            narg: -1,
+            deterministic: true,
+        });
+        funcs.push(FunctionListEntry {
+            name: "if".into(),
+            func_type: "s",
+            narg: -1,
+            deterministic: true,
+        });
 
         funcs
     }
-
-    /// Whether `resolved` is `listed`, a function from the engine's own list.
-    /// Every function in that list is a variant without fields, so comparing
-    /// variants compares the functions.
-    fn is_same_builtin(listed: &Func, resolved: &Func) -> bool {
-        use std::mem::discriminant;
-        match (listed, resolved) {
-            (
-                Func::Agg(AggFunc::External(_))
-                | Func::Window(WindowFunc::External(_))
-                | Func::External(_)
-                | Func::Dialect(_)
-                | Func::AlterTable(_),
-                _,
-            ) => unreachable!("the engine's function list has only built-in functions"),
-            (_, Func::Agg(AggFunc::External(_)) | Func::Window(WindowFunc::External(_))) => false,
-            (Func::Agg(listed), Func::Agg(resolved)) => {
-                discriminant(listed) == discriminant(resolved)
-            }
-            (Func::Window(listed), Func::Window(resolved)) => {
-                discriminant(listed) == discriminant(resolved)
-            }
-            (Func::Vector(listed), Func::Vector(resolved)) => {
-                discriminant(listed) == discriminant(resolved)
-            }
-            (Func::Scalar(listed), Func::Scalar(resolved)) => listed == resolved,
-            (Func::Math(listed), Func::Math(resolved)) => listed == resolved,
-            #[cfg(all(feature = "fts", not(target_family = "wasm")))]
-            (Func::Fts(listed), Func::Fts(resolved)) => listed == resolved,
-            #[cfg(feature = "json")]
-            (Func::Json(listed), Func::Json(resolved)) => listed == resolved,
-            // A different kind of function.
-            _ => false,
-        }
-    }
 }
 
-#[derive(Debug, PartialEq)]
 pub struct FunctionListEntry {
     pub name: String,
     pub func_type: &'static str, // "s" = scalar, "a" = aggregate, "w" = window
     pub narg: i32,               // -1 = variable
     pub deterministic: bool,
-}
-
-impl FunctionListEntry {
-    /// The argument count a call of this entry is resolved with to decide
-    /// whether a dialect can call it. Every function that takes any number of
-    /// arguments takes two: concat_ws() needs two, and max() and min() with
-    /// fewer are the aggregates.
-    fn probe_arg_count(&self) -> usize {
-        match self.narg {
-            -1 => 2,
-            narg => usize::try_from(narg).expect("a function's narg is -1 or a count"),
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The function list leaves out an entry the dialect doesn't resolve.
-    /// For a function that takes any number of arguments, that is right only
-    /// if the engine resolves it with the two arguments the list tries.
-    #[test]
-    fn every_variadic_engine_function_resolves_with_two_arguments() {
-        let variadic: Vec<String> = Func::engine_function_list()
-            .into_iter()
-            .filter(|(entry, _)| entry.narg == -1)
-            .map(|(entry, _)| entry.name)
-            .collect();
-        assert!(variadic.iter().any(|name| name == "concat_ws"));
-        let unresolved: Vec<&String> = variadic
-            .iter()
-            .filter(|name| {
-                crate::dialect::engine::resolve_builtin_function(name, 2)
-                    .expect("a variadic function accepts two arguments")
-                    .is_none()
-            })
-            .collect();
-        assert!(unresolved.is_empty(), "not resolved: {unresolved:?}");
-    }
-
-    struct NamesWhatItDoesNotResolve;
-
-    impl crate::Dialect for NamesWhatItDoesNotResolve {
-        fn name(&self) -> &'static str {
-            "names what it does not resolve"
-        }
-
-        fn function_names(&self) -> &'static [(&'static str, ScalarFunc)] {
-            &[("not_a_function", ScalarFunc::Now)]
-        }
-    }
-
-    #[test]
-    #[should_panic(expected = "a dialect resolves every name in its function_names")]
-    fn a_dialect_name_that_does_not_resolve_panics() {
-        Func::builtin_function_list(&NamesWhatItDoesNotResolve).unwrap();
-    }
-
-    struct NamesAnEngineFunction;
-
-    impl crate::Dialect for NamesAnEngineFunction {
-        fn name(&self) -> &'static str {
-            "names an engine function"
-        }
-
-        fn resolve_function(&self, name: &str, arg_count: usize) -> crate::Result<Option<Func>> {
-            if name == "statement_timestamp" {
-                return Ok(Some(Func::Scalar(ScalarFunc::StatementTimestamp)));
-            }
-            crate::dialect::engine::resolve_builtin_function(name, arg_count)
-        }
-
-        fn function_names(&self) -> &'static [(&'static str, ScalarFunc)] {
-            &[("statement_timestamp", ScalarFunc::StatementTimestamp)]
-        }
-    }
-
-    #[test]
-    fn a_dialect_name_that_the_engine_also_has_is_listed_once() {
-        let rows = Func::builtin_function_list(&NamesAnEngineFunction).unwrap();
-        let named: Vec<&FunctionListEntry> = rows
-            .iter()
-            .filter(|entry| entry.name == "statement_timestamp")
-            .collect();
-        assert_eq!(named.len(), 1, "{named:?}");
-    }
-
-    struct NamesTheWrongFunction;
-
-    impl crate::Dialect for NamesTheWrongFunction {
-        fn name(&self) -> &'static str {
-            "names the wrong function"
-        }
-
-        fn resolve_function(&self, name: &str, arg_count: usize) -> crate::Result<Option<Func>> {
-            if name == "statement_timestamp" {
-                return Ok(Some(Func::Scalar(ScalarFunc::Random)));
-            }
-            crate::dialect::engine::resolve_builtin_function(name, arg_count)
-        }
-
-        fn function_names(&self) -> &'static [(&'static str, ScalarFunc)] {
-            &[("statement_timestamp", ScalarFunc::StatementTimestamp)]
-        }
-    }
-
-    #[test]
-    #[should_panic(
-        expected = "a dialect resolves every name in its function_names to its function"
-    )]
-    fn a_dialect_name_that_resolves_to_another_function_panics() {
-        Func::builtin_function_list(&NamesTheWrongFunction).unwrap();
-    }
-
-    struct RenamesAnEngineFunction;
-
-    impl crate::Dialect for RenamesAnEngineFunction {
-        fn name(&self) -> &'static str {
-            "renames an engine function"
-        }
-
-        fn resolve_function(&self, name: &str, arg_count: usize) -> crate::Result<Option<Func>> {
-            if name == "abs" {
-                return Ok(Some(Func::Scalar(ScalarFunc::Random)));
-            }
-            crate::dialect::engine::resolve_builtin_function(name, arg_count)
-        }
-    }
-
-    #[test]
-    #[should_panic(expected = "a dialect resolves an engine function's name to that function")]
-    fn an_engine_name_that_resolves_to_another_function_panics() {
-        Func::builtin_function_list(&RenamesAnEngineFunction).unwrap();
-    }
 }

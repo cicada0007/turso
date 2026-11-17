@@ -67,14 +67,14 @@ pub fn exec_temporal_encode(value: &Value, type_name: &Value) -> Result<Value> {
 
 /// A point in time as a `timestamptz` value, in the text the type stores, so
 /// that it compares and sorts with the values of `timestamptz` columns.
-pub fn format_timestamptz(instant: WallClockInstant) -> Result<Value> {
+pub fn format_timestamptz(instant: WallClockInstant) -> Result<String> {
     let Some(timestamp) = chrono::DateTime::from_timestamp(instant.secs, instant.micros * 1000)
     else {
         return Err(range_error("now"));
     };
     let timestamp = timestamp.naive_utc();
     check_year(timestamp.year(), "now", TemporalType::Timestamptz)?;
-    Ok(Value::build_text(format_timestamp(timestamp)))
+    Ok(format_timestamp(timestamp))
 }
 
 /// PostgreSQL's frontend reports these as `invalid_datetime_format`. Values

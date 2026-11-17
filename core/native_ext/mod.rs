@@ -1,6 +1,7 @@
 mod function;
 mod vtab;
 
+pub use crate::dialect::ScalarFuncContext;
 pub use crate::function::ReturnType;
 
 pub use function::{

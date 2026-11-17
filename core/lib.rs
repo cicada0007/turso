@@ -100,6 +100,9 @@ pub use function::{ExternalFunc, Func, ScalarFunc};
 /// The ENCODE of the built-in date and time types, also used by the PostgreSQL
 /// frontend to check input in `pg_input_is_valid`.
 pub use functions::datetime_input::exec_temporal_encode;
+/// A point in time as `timestamptz` text, for `now()` and the PostgreSQL
+/// frontend's other clock functions.
+pub use functions::datetime_input::format_timestamptz;
 /// The printf engine backing the SQL printf()/format() functions, also used
 /// by the C API's sqlite3_mprintf/sqlite3_snprintf so both share one
 /// formatting implementation.

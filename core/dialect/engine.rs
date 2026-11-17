@@ -234,20 +234,14 @@ fn pragma_vtabs() -> Vec<Arc<VirtualTable>> {
 /// surface regardless of the frontend dialect.
 pub fn resolve_builtin_function(name: &str, arg_count: usize) -> crate::Result<Option<Func>> {
     let func = resolve_builtin_function_name(name, arg_count)?;
+    // Reject scalar calls whose argument count is not in `arities()`.
     if let Some(Func::Scalar(srf)) = &func {
-        check_scalar_arity(srf, name, arg_count)?;
+        let arities = srf.arities();
+        if !arities.contains(&-1) && !arities.contains(&(arg_count as i32)) {
+            crate::bail_parse_error!("wrong number of arguments to function {}()", name)
+        }
     }
     Ok(func)
-}
-
-/// Rejects a call of a scalar function whose argument count is not in
-/// `arities()`.
-pub fn check_scalar_arity(func: &ScalarFunc, name: &str, arg_count: usize) -> crate::Result<()> {
-    let arities = func.arities();
-    if !arities.contains(&-1) && !arities.contains(&(arg_count as i32)) {
-        crate::bail_parse_error!("wrong number of arguments to function {}()", name)
-    }
-    Ok(())
 }
 
 /// Resolves a built-in function by name without checking the argument count
@@ -919,9 +913,7 @@ pub fn call_builtin_scalar(
         )),
         ScalarFunc::JulianDay => Ok(exec_julianday(context.clock, registers_to_ref_values(args))),
         ScalarFunc::UnixEpoch => Ok(exec_unixepoch(context.clock, registers_to_ref_values(args))),
-        ScalarFunc::Now => format_timestamptz(context.transaction_time()),
-        ScalarFunc::StatementTimestamp => format_timestamptz(context.statement_time()),
-        ScalarFunc::ClockTimestamp => format_timestamptz(context.clock_time()),
+        ScalarFunc::Now => format_timestamptz(context.transaction_time()).map(Value::build_text),
         ScalarFunc::SqliteVersion => Ok(Value::build_text(execute_sqlite_version())),
         ScalarFunc::SqliteSourceId => Ok(Value::build_text(format!(
             "{} {}",

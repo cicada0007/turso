@@ -1,11 +1,12 @@
 use crate::alloc::TryClone;
 use crate::function::{ExtFunc, ExternalFunc};
 use crate::native_ext::{
-    AggregateFunction, ExtensionState, FunctionArity, ScalarCall, ScalarFunction, ScalarReturn,
+    AggregateFunction, ExtensionState, FunctionArity, ScalarCall, ScalarFuncContext,
+    ScalarFunction, ScalarReturn,
 };
 use crate::sync::Arc;
 use crate::types::{AggContext, ExternalAggState, IOResultOr};
-use crate::{Connection, IOResult, OpenOptions, Register, Result, Value};
+use crate::{IOResult, OpenOptions, Register, Result, Value};
 use turso_ext::ValueDestructor;
 
 impl OpenOptions {
@@ -72,12 +73,12 @@ impl ExtFunc {
     pub fn call_scalar(
         &self,
         state: &mut ExtensionState,
-        connection: &Arc<Connection>,
+        context: &ScalarFuncContext<'_>,
         args: &[Register],
     ) -> IOResultOr<Value> {
         match self {
             Self::NativeScalar { function, .. } => {
-                crate::native_ext::step_scalar(state, function.as_ref(), connection, args)
+                crate::native_ext::step_scalar(state, function.as_ref(), context, args)
             }
             Self::Scalar {
                 context,
