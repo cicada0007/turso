@@ -707,17 +707,8 @@ impl Statement {
             self.release_active_root_if_counted(!matches!(res, Ok(StepResult::Done)));
         }
 
-        // If the bytecode aborted between SequenceBeginInnerTx and
-        // SequenceCommitInnerTx, the connection's mv_tx is still pointing
-        // at the orphan inner; subsequent statements (e.g. reparse_schema
-        // SELECTs from _step's own reprepare path) would inherit it and
-        // deadlock in commit_txn's WaitForDependencies. Roll back and
-        // restore the outer eagerly here — reset_internal alone is not
-        // enough because callers do not always reset on error before
-        // running another statement.
         if res.is_err() {
             self.rollback_pending_fresh_tx_if_needed();
-            self.cleanup_orphaned_seq_inner_tx();
         }
 
         // When the step returns Busy (no more busy-handler retries) and we
@@ -1443,44 +1434,6 @@ impl Statement {
         conn.set_tx_state(TransactionState::Pending { concurrent });
     }
 
-    fn cleanup_orphaned_seq_inner_tx(&mut self) {
-        let Some(pending) = self.state.sequence_inner_tx_pending.take() else {
-            return;
-        };
-        let conn = self.program.connection.clone();
-        let Some(mv_store) = conn.mv_store_for_db(pending.db) else {
-            return;
-        };
-        if mv_store.is_tx_rollbackable(pending.inner_tx_id) {
-            mv_store.rollback_tx(pending.inner_tx_id, self.pager.clone(), &conn, pending.db);
-        }
-        conn.set_mv_tx_for_db(pending.db, pending.saved_outer);
-        // When the inner tx aborted via the vdbe's catch-all error path
-        // (e.g. SequenceExhausted), rollback_current_txn_state
-        // rolled back what mv_tx pointed at — the inner — and set
-        // auto_commit=true under the assumption it was the only live tx.
-        // Restoring mv_tx to the outer without also restoring auto_commit=false
-        // leaves the connection in an inconsistent state where auto_commit=true
-        // but mv_tx points to a live outer tx, which causes subsequent BEGINs
-        // to silently no-op and pins the caller to the outer's stale snapshot.
-        if pending.saved_outer.is_some() {
-            if let Some(start) = pending.saved_transaction_time {
-                conn.begin_user_transaction(start);
-            } else {
-                // The outer transaction is the statement's own, which an
-                // attached database's sequence wraps while another statement
-                // reads. The connection was in autocommit then and still is.
-                turso_assert!(
-                    conn.get_auto_commit(),
-                    "a sequence's inner transaction left autocommit without a user transaction"
-                );
-            }
-        }
-        // The commit-state-machine, if any was in flight, is now dead:
-        // the inner tx it was committing is gone.
-        self.state.sequence_inner_commit = None;
-    }
-
     pub fn reset_best_effort(&mut self) {
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.reset())) {
             Ok(Ok(())) => {}
@@ -1498,7 +1451,12 @@ impl Statement {
     /// already handled trigger execution tracking. Only resets ProgramState
     /// fields so the subprogram can run again from the beginning.
     pub fn reset_for_subprogram_reuse(&mut self) {
-        self.cleanup_orphaned_seq_inner_tx();
+        // A subprogram that stopped inside `nextval` was aborted, and abort
+        // ends the sequence's inner transaction.
+        turso_assert!(
+            self.state.sequence_inner_tx_pending.is_none(),
+            "a trigger program is reused while a sequence's inner transaction is open"
+        );
         self.state.reset(None, None);
         self.state
             .n_change
@@ -1675,7 +1633,6 @@ impl Statement {
             self.release_active_root_if_counted(statement_failed);
         }
         self.state.stop_counting_as_reader(&self.program.connection);
-        self.cleanup_orphaned_seq_inner_tx();
         self.state.reset(max_registers, max_cursors);
         self.busy = false;
         self.busy_handler_state = None;

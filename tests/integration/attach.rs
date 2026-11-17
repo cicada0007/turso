@@ -1014,3 +1014,51 @@ fn test_attached_sequence_that_runs_out_while_a_statement_reads_leaves_autocommi
     assert_eq!(rows, vec![(4, 1)]);
     Ok(())
 }
+
+/// A statement that fails while `nextval` on an attached MVCC database runs in
+/// a transaction of its own ends the statement's transaction on that database
+/// too, so the next statement there sees rows committed since.
+#[test]
+fn test_attached_sequence_failure_ends_the_attached_transaction() -> anyhow::Result<()> {
+    let db = TempDatabase::builder()
+        .with_opts(DatabaseOpts::new().with_attach(true))
+        .with_mvcc(true)
+        .build();
+    let aux_path = db.path.with_extension("attached_sequence_failure.db");
+    let aux_path = aux_path.to_str().unwrap();
+    {
+        let aux = Database::open_file(db.io.clone(), aux_path, Arc::new(SqliteDialect))?;
+        let aux = aux.connect(ConnectOpts::new(SessionRole::Superuser))?;
+        aux.pragma_update("journal_mode", "'mvcc'")?;
+        aux.execute("CREATE SEQUENCE tiny MAXVALUE 2")?;
+        aux.execute("SELECT nextval('tiny')")?;
+        aux.execute("CREATE TABLE v (x INTEGER)")?;
+        aux.close()?;
+    }
+    let conn = db.connect_limbo();
+    conn.execute("CREATE TABLE t (x INTEGER)")?;
+    conn.execute("INSERT INTO t VALUES (1), (2), (3)")?;
+    conn.execute(format!("ATTACH '{aux_path}' AS aux"))?;
+
+    let mut reader = conn.query("SELECT x FROM t")?.unwrap();
+    loop {
+        match reader.step()? {
+            StepResult::Row => break,
+            StepResult::IO => db.io.step()?,
+            other => panic!("expected a row, got {other:?}"),
+        }
+    }
+    let result = conn.execute("INSERT INTO aux.v SELECT nextval('aux.tiny') FROM t");
+    assert!(
+        matches!(result, Err(LimboError::SequenceExhausted { .. })),
+        "the sequence runs out on the second row, got {result:?}"
+    );
+
+    let other = db.connect_limbo();
+    other.execute(format!("ATTACH '{aux_path}' AS aux"))?;
+    other.execute("INSERT INTO aux.v VALUES (10)")?;
+    let rows: Vec<(i64,)> = conn.exec_rows("SELECT x FROM aux.v");
+    assert_eq!(rows, vec![(10,)]);
+    drop(reader);
+    Ok(())
+}

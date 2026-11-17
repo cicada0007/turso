@@ -14377,12 +14377,6 @@ pub fn op_sequence_begin_inner_tx(
         }
     }
 
-    // A failed inner transaction puts back autocommit or the user's
-    // transaction, never a transaction the engine runs for itself.
-    turso_assert!(
-        conn.get_auto_commit() || conn.transaction_time().is_some(),
-        "a sequence's inner transaction inside a transaction the engine runs for itself"
-    );
     let inner_tx_id = mv_store.begin_tx_with_schema_generation_and_checkpoint_read_guard(
         pager.clone(),
         None,
@@ -14400,14 +14394,13 @@ pub fn op_sequence_begin_inner_tx(
     let saved = encode_saved_outer_mv_tx(outer_tx);
     state.registers[*path_kind_reg].set_value(Value::from_i64(SEQ_PATH_WRAPPED));
     state.registers[*saved_outer_reg].set_value(Value::Blob(saved));
-    // Record the in-flight inner-tx state so a statement reset / abort
-    // before the matching SequenceCommitInnerTx can roll it back. See
-    // `Statement::cleanup_orphaned_seq_inner_tx`.
+    // Record the in-flight inner-tx state so an abort before the matching
+    // SequenceCommitInnerTx can roll it back. See
+    // `Program::rollback_sequence_inner_tx`.
     state.sequence_inner_tx_pending = Some(crate::vdbe::SequenceInnerTxState {
         db: *db,
         inner_tx_id,
         saved_outer: outer_tx,
-        saved_transaction_time: conn.transaction_time(),
     });
     state.pc += 1;
     Ok(InsnFunctionStepResult::Step)

@@ -8060,9 +8060,8 @@ fn test_three_concurrent_autoincrement_inserts() {
 /// Whopper reproduces this as a `parse_schema_rows → SELECT →
 /// commit_txn → CommitStateMachine::WaitForDependencies` deadlock
 /// after a sequence exhaustion error in some prior in-tx nextval.
-/// `Statement::cleanup_orphaned_seq_inner_tx` plus the new
-/// `ProgramState::sequence_inner_tx_pending` field together close
-/// the leak.
+/// `Program::abort` rolls back the inner transaction that
+/// `ProgramState::sequence_inner_tx_pending` records.
 #[test]
 fn test_inner_tx_cleanup_after_sequence_exhaustion() {
     let db = MvccTestDbNoConn::new_with_random_db();
@@ -8101,16 +8100,12 @@ fn test_inner_tx_cleanup_after_sequence_exhaustion() {
 /// `INSERT … DEFAULT VALUES` with a SERIAL-defaulted column whose sequence is
 /// exhausted hits `SequenceExhausted` inside `SequenceComputeNext`, AFTER
 /// `SequenceBeginInnerTx` has swapped `conn.mv_tx` from the outer (Concurrent
-/// tx) to the inner. The vdbe abort path's catch-all for unmatched errors
-/// (`vdbe/mod.rs`) calls `rollback_current_txn_state`, which rolls back the
-/// inner (currently held in `mv_tx`) and sets `auto_commit = true`.
-/// `cleanup_orphaned_seq_inner_tx` then restores `mv_tx` to the outer — but
-/// without also restoring `auto_commit = false`, the connection ends up in
-/// an inconsistent state where `auto_commit = true` yet `mv_tx = Some(outer)`.
-/// Subsequent BEGINs on the connection no-op (the engine sees `mv_tx`
-/// already set), so the next "fresh" transaction reuses the outer's stale
-/// snapshot and cannot observe rows committed by other connections after
-/// the outer's begin timestamp.
+/// tx) to the inner. If abort decided what to roll back while `mv_tx` still
+/// held the inner, the connection could end up with `auto_commit = true` yet
+/// `mv_tx = Some(outer)`. Subsequent BEGINs on the connection no-op (the
+/// engine sees `mv_tx` already set), so the next "fresh" transaction reuses
+/// the outer's stale snapshot and cannot observe rows committed by other
+/// connections after the outer's begin timestamp.
 #[test]
 fn test_auto_commit_coherent_after_sequence_exhaustion_in_outer_tx() {
     let db = MvccTestDbNoConn::new_with_random_db();
