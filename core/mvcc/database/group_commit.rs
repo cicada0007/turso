@@ -65,7 +65,7 @@ pub(crate) enum GroupWork {
 }
 
 #[derive(Debug)]
-pub(crate) struct CommitCoordinator {
+pub struct CommitCoordinator {
     pub pager_commit_lock: Arc<TursoRwLock>,
     group_commit_enabled: AtomicBool,
     group: Mutex<GroupState>,
@@ -119,7 +119,7 @@ impl CommitCoordinator {
             .clone()
     }
 
-    pub(crate) fn unlock_pager_commit_lock(&self) {
+    pub fn unlock_pager_commit_lock(&self) {
         self.pager_commit_lock.unlock();
         let woken = {
             let mut group = self.group.lock();
@@ -295,8 +295,8 @@ impl CommitCoordinator {
         self.last_group_size.load(Ordering::Acquire)
     }
 
-    #[cfg(test)]
-    pub(crate) fn parked_tickets(&self) -> Vec<u64> {
+    #[cfg(any(test, feature = "test_helper"))]
+    pub fn parked_tickets(&self) -> Vec<u64> {
         self.group.lock().parked.keys().copied().collect()
     }
 
