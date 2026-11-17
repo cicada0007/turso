@@ -216,7 +216,7 @@ expect {
 test current-setting-takes-arguments-from-rows {
     CREATE TABLE setting_names (id int, name text, missing_ok boolean);
     INSERT INTO setting_names VALUES
-        (1, 'search_path', false), (2, 'no_such_setting', true),
+        (1, 'search_path', false), (2, 'nosuch.setting', true),
         (3, NULL, false), (4, 'search_path', NULL);
     SELECT id, coalesce(current_setting(name, missing_ok), '<null>')
     FROM setting_names ORDER BY id;
@@ -241,15 +241,24 @@ expect {
     <null>
 }
 
-test current-setting-missing-ok-returns-null-for-unknown-parameters {
-    SELECT coalesce(current_setting('no_such_setting', true), '<null>');
+test current-setting-missing-ok-returns-null-for-undefined-custom-parameters {
     SELECT coalesce(current_setting('nosuch.setting', true), '<null>');
-    SELECT coalesce(current_setting('', true), '<null>');
 }
 expect {
     <null>
+}
+
+# tursopg cannot tell a name PostgreSQL knows from one it does not, so it
+# refuses every name it does not list, even with missing_ok.
+test current-setting-missing-ok-of-an-unknown-parameter {
+    SELECT coalesce(current_setting('no_such_setting', true), '<null>');
+}
+expect {
     <null>
-    <null>
+}
+@sqlstate 0A000
+expect @tursopg error {
+    parameter "no_such_setting" is not supported
 }
 
 test current-setting-unknown-parameter-errors {
@@ -259,6 +268,10 @@ test current-setting-unknown-parameter-errors {
 expect error {
     unrecognized configuration parameter "no_such_setting"
 }
+@sqlstate 0A000
+expect @tursopg error {
+    parameter "no_such_setting" is not supported
+}
 
 test current-setting-unknown-parameter-without-missing-ok-errors {
     SELECT current_setting('no_such_setting', false);
@@ -267,6 +280,10 @@ test current-setting-unknown-parameter-without-missing-ok-errors {
 expect error {
     unrecognized configuration parameter "no_such_setting"
 }
+@sqlstate 0A000
+expect @tursopg error {
+    parameter "no_such_setting" is not supported
+}
 
 test current-setting-does-not-trim-the-parameter-name {
     SELECT current_setting('search_path ');
@@ -274,6 +291,10 @@ test current-setting-does-not-trim-the-parameter-name {
 @sqlstate 42704
 expect error {
     unrecognized configuration parameter "search_path "
+}
+@sqlstate 0A000
+expect @tursopg error {
+    parameter "search_path " is not supported
 }
 
 test current-setting-integer-parameter-name-errors {
@@ -289,8 +310,8 @@ test current-setting-text-missing-ok-errors {
 expect error {}
 
 test current-setting-missing-ok-accepts-boolean-text {
-    SELECT coalesce(current_setting('no_such_setting', 'yes'), '<null>');
-    SELECT coalesce(current_setting('no_such_setting', ' TRUE '), '<null>');
+    SELECT coalesce(current_setting('nosuch.setting', 'yes'), '<null>');
+    SELECT coalesce(current_setting('nosuch.setting', ' TRUE '), '<null>');
 }
 expect {
     <null>
@@ -298,17 +319,17 @@ expect {
 }
 
 test current-setting-missing-ok-false-text-errors {
-    SELECT current_setting('no_such_setting', ' Off ');
+    SELECT current_setting('nosuch.setting', ' Off ');
 }
 @sqlstate 42704
 expect error {
-    unrecognized configuration parameter "no_such_setting"
+    unrecognized configuration parameter "nosuch\.setting"
 }
 
 test current-setting-missing-ok-accepts-the-start-of-a-boolean-word {
-    SELECT coalesce(current_setting('no_such_setting', 'tr'), '<null>');
-    SELECT coalesce(current_setting('no_such_setting', 'Y'), '<null>');
-    SELECT coalesce(current_setting('no_such_setting', 'tRu'), '<null>');
+    SELECT coalesce(current_setting('nosuch.setting', 'tr'), '<null>');
+    SELECT coalesce(current_setting('nosuch.setting', 'Y'), '<null>');
+    SELECT coalesce(current_setting('nosuch.setting', 'tRu'), '<null>');
 }
 expect {
     <null>
@@ -317,15 +338,15 @@ expect {
 }
 
 test current-setting-missing-ok-of-is-false {
-    SELECT current_setting('no_such_setting', 'of');
+    SELECT current_setting('nosuch.setting', 'of');
 }
 @sqlstate 42704
 expect error {
-    unrecognized configuration parameter "no_such_setting"
+    unrecognized configuration parameter "nosuch\.setting"
 }
 
 test current-setting-missing-ok-o-is-not-a-boolean {
-    SELECT current_setting('no_such_setting', 'o');
+    SELECT current_setting('nosuch.setting', 'o');
 }
 @sqlstate 22P02
 expect error {
@@ -333,7 +354,7 @@ expect error {
 }
 
 test current-setting-missing-ok-longer-than-a-boolean-word-errors {
-    SELECT current_setting('no_such_setting', 'truee');
+    SELECT current_setting('nosuch.setting', 'truee');
 }
 @sqlstate 22P02
 expect error {
@@ -507,6 +528,10 @@ test set-config-unknown-parameter-without-a-dot-errors {
 @sqlstate 42704
 expect error {
     unrecognized configuration parameter "no_such_setting"
+}
+@sqlstate 0A000
+expect @tursopg error {
+    parameter "no_such_setting" is not supported
 }
 
 test set-config-local-custom-parameter-in-one-statement {

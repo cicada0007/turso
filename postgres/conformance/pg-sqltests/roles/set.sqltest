@@ -219,7 +219,7 @@ test set-session-authorization-is-not-supported {
 }
 @sqlstate 0A000
 expect error {
-    SET session_authorization is not supported
+    parameter "session_authorization" is not supported
 }
 
 test reset-role-restores-superuser-privileges {

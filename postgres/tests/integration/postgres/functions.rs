@@ -168,7 +168,7 @@ fn test_pg_set_config_validates_arguments(db: TempDatabase) {
     for (sql, message) in [
         (
             "SELECT set_config('statement_timeout', '100', false)",
-            "invalid value for parameter",
+            r#"parameter "statement_timeout" does not support value "100"; supported: "0""#,
         ),
         (
             "SELECT set_config(NULL, 'public', false)",
@@ -240,15 +240,54 @@ fn test_pg_current_setting_reads_connection_settings_when_executed(db: TempDatab
 }
 
 #[turso_macros::test(mvcc)]
-fn test_pg_current_setting_reports_default_without_session_state(db: TempDatabase) {
+fn test_pg_connection_refuses_a_context_that_is_not_its_session_state(db: TempDatabase) {
+    struct OtherHooks;
+    impl turso_core::ConnectionHooks for OtherHooks {
+        fn root_statement_ended(&self, _: &turso_core::Connection, _: bool) {}
+        fn transaction_rolled_back(&self, _: &turso_core::Connection) {}
+        fn savepoint_created(&self, _: &turso_core::Connection) -> turso_core::SavepointMemo {
+            std::sync::Arc::new(())
+        }
+        fn rolled_back_to_savepoint(
+            &self,
+            _: &turso_core::Connection,
+            _: &turso_core::SavepointMemo,
+        ) {
+        }
+    }
+
+    let opts = || turso_core::ConnectOpts::new(turso_core::SessionRole::Superuser);
+    for result in [
+        db.db.connect_with_context(opts(), std::sync::Arc::new(7)),
+        db.db
+            .connect_with_hooks(opts(), std::sync::Arc::new(OtherHooks)),
+    ] {
+        let Err(error) = result else {
+            panic!("expected the connection to be refused");
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("a PostgreSQL connection's context must be its session state"),
+            "{error}"
+        );
+    }
+}
+
+#[turso_macros::test(mvcc)]
+fn test_pg_engine_connection_has_session_settings(db: TempDatabase) {
     let conn = db.connect_limbo();
-    assert_eq!(
-        conn.prepare("SELECT current_setting('search_path')")
-            .unwrap()
-            .run_collect_rows()
-            .unwrap(),
-        vec![vec![Value::build_text("\"$user\", public")]]
-    );
+    for (sql, value) in [
+        ("SELECT current_setting('DateStyle')", "ISO, MDY"),
+        ("SELECT set_config('app.user_id', '42', false)", "42"),
+        ("SELECT current_setting('app.user_id')", "42"),
+    ] {
+        assert_eq!(
+            conn.prepare(sql).unwrap().run_collect_rows().unwrap(),
+            vec![vec![Value::build_text(value)]],
+            "{sql}"
+        );
+    }
 }
 
 #[turso_macros::test(mvcc)]
@@ -784,7 +823,7 @@ fn test_pg_builtin_settings_validate_all_entry_points(db: TempDatabase) {
         ("IntervalStyle", "postgres", "postgres", "sql_standard"),
         ("client_encoding", "unicode", "UTF8", "LATIN1"),
         ("standard_conforming_strings", "true", "on", "off"),
-        ("extra_float_digits", "3", "1", "0"),
+        ("extra_float_digits", "1", "1", "0"),
         ("statement_timeout", "0", "0", "100"),
         ("lock_timeout", "0", "0", "1"),
         ("idle_in_transaction_session_timeout", "0", "0", "1"),
@@ -800,6 +839,8 @@ fn test_pg_builtin_settings_validate_all_entry_points(db: TempDatabase) {
         ("default_table_access_method", "heap", "heap", "other"),
         ("xmloption", "content", "content", "document"),
         ("client_min_messages", "warning", "warning", "debug"),
+        ("TimeZone", "etc/utc", "Etc/UTC", "Europe/Helsinki"),
+        ("application_name", "", "", "café"),
     ] {
         assert_eq!(query_text(&conn, &format!("SHOW {name}")), [canonical]);
         conn.execute(format!("SET {name} = '{accepted}'")).unwrap();
@@ -820,7 +861,9 @@ fn test_pg_builtin_settings_validate_all_entry_points(db: TempDatabase) {
         ] {
             let error = conn.execute(&sql).unwrap_err().to_string();
             assert!(
-                error.contains("invalid value for parameter"),
+                error.contains(&format!(
+                    "parameter \"{name}\" does not support value \"{rejected}\""
+                )),
                 "{sql}: {error}"
             );
         }
@@ -859,9 +902,12 @@ fn test_pg_application_name_isolation_and_rollback(db: TempDatabase) {
     conn.execute("DISCARD ALL").unwrap();
     assert_eq!(query_text(&conn, "SHOW application_name"), [""]);
     assert_eq!(
-        query_text(&conn, "SELECT current_setting('unknown_builtin', true)"),
+        query_text(&conn, "SELECT current_setting('app.unknown', true)"),
         ["NULL"]
     );
+    assert!(conn
+        .execute("SELECT current_setting('unknown_builtin', true)")
+        .is_err());
     assert!(conn
         .execute("SELECT current_setting('unknown_builtin')")
         .is_err());

@@ -33,6 +33,10 @@ pub enum Error {
     #[error("connection rejected: {0}")]
     Rejected(String),
 
+    /// The server answered the startup message with an ErrorResponse.
+    #[error("connection rejected: {}", error_message(.0))]
+    StartupError(ErrorFields),
+
     #[error("invalid DSN: {0}")]
     Dsn(String),
 }
@@ -129,6 +133,8 @@ impl ConnParams {
 pub struct PgConn {
     reader: BufReader<TcpStream>,
     writer: BufWriter<TcpStream>,
+    /// The parameter values the server reported during startup.
+    startup_parameters: HashMap<String, String>,
 }
 
 impl PgConn {
@@ -139,7 +145,11 @@ impl PgConn {
         let stream = TcpStream::connect((params.host.as_str(), params.port))?;
         let reader = BufReader::new(stream.try_clone()?);
         let writer = BufWriter::new(stream);
-        let mut conn = PgConn { reader, writer };
+        let mut conn = PgConn {
+            reader,
+            writer,
+            startup_parameters: HashMap::new(),
+        };
 
         let mut startup = Vec::new();
         startup.extend_from_slice(&196608u32.to_be_bytes()); // protocol 3.0
@@ -184,12 +194,15 @@ impl PgConn {
                         }
                     }
                 }
-                b'S' | b'K' | b'N' => {} // ParameterStatus, BackendKeyData, notices
-                b'Z' => return Ok(conn),
-                b'E' => {
-                    let fields = parse_error_fields(&body)?;
-                    return Err(Error::Rejected(error_message(&fields).to_string()));
+                b'S' => {
+                    let mut r = Reader::new(&body);
+                    let name = r.cstring()?;
+                    let value = r.cstring()?;
+                    conn.startup_parameters.insert(name, value);
                 }
+                b'K' | b'N' => {} // BackendKeyData, notices
+                b'Z' => return Ok(conn),
+                b'E' => return Err(Error::StartupError(parse_error_fields(&body)?)),
                 other => {
                     return Err(Error::Protocol(format!(
                         "unexpected message {:?} during startup",
@@ -198,6 +211,11 @@ impl PgConn {
                 }
             }
         }
+    }
+
+    /// The parameter values the server reported during startup.
+    pub fn startup_parameters(&self) -> &HashMap<String, String> {
+        &self.startup_parameters
     }
 
     /// Sets a read timeout on the underlying socket. Blocking reads past the

@@ -366,7 +366,7 @@ fn lookup_and_input_errors_report_postgres_sqlstates() {
     conn.execute("CREATE TABLE t (j jsonb)").unwrap();
     for (sql, code) in [
         ("SELECT current_setting('nosuch.x')", "42704"),
-        ("SELECT set_config('nodot', 'x', false)", "42704"),
+        ("SELECT set_config('nodot', 'x', false)", "0A000"),
         ("SELECT set_config('a..b', 'x', false)", "42602"),
         ("SELECT current_setting('a..b')", "42704"),
         ("INSERT INTO t VALUES ('not json')", "22P02"),

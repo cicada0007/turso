@@ -1,8 +1,10 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use turso_core::security::roles::RoleId;
 use turso_core::{Connection, ConnectionHooks, SavepointMemo};
+
+use crate::session::{session_state, CustomName};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SettingScope {
@@ -10,12 +12,39 @@ pub(crate) enum SettingScope {
     Transaction,
 }
 
-#[derive(Default)]
 pub(crate) struct PgSessionState {
     settings: Mutex<ConnectionSettings>,
 }
 
 impl PgSessionState {
+    /// The state of a session whose client sent `startup_parameters`. A
+    /// parameter's startup value is also the value RESET returns it to, as in
+    /// PostgreSQL.
+    pub(crate) fn new(startup_parameters: &BTreeMap<String, String>) -> turso_core::Result<Self> {
+        let mut settings = ConnectionSettings::default();
+        for parameter in PARAMETERS {
+            match parameter.kind {
+                Kind::Stored { default, .. } => settings.define(parameter, default.to_owned()),
+                Kind::SearchPath | Kind::Role => {}
+            }
+        }
+        // PostgreSQL applies the last of two spellings of one name, such as
+        // TimeZone and timezone. The map is sorted, so the order the client
+        // sent them in is lost, and a name given twice is refused.
+        let mut given = HashSet::new();
+        for (name, value) in startup_parameters {
+            if !given.insert(SettingKey::new(name)) {
+                return Err(feature_not_supported(format!(
+                    "giving the startup parameter \"{name}\" more than once is not supported"
+                )));
+            }
+            define_startup_value(&mut settings, name, value)?;
+        }
+        Ok(Self {
+            settings: Mutex::new(settings),
+        })
+    }
+
     pub(crate) fn mutate(&self, conn: &Connection, mutate: impl FnOnce(&mut ConnectionSettings)) {
         let mut settings = self.settings.lock().unwrap();
         settings.save_memo_before_change(conn.has_active_root_statement(), !conn.get_auto_commit());
@@ -47,7 +76,7 @@ impl PgSessionState {
             .lock()
             .unwrap()
             .names_as_defined
-            .get(&name.to_ascii_lowercase())
+            .get(&SettingKey::new(name))
             .cloned()
     }
 
@@ -103,10 +132,24 @@ pub(crate) struct ConnectionSettings {
     current: SettingValues,
     memo_before_transaction: Option<SettingValues>,
     memo_before_statement: Option<SettingValues>,
-    /// Each parameter's name as written when it was first set, by
-    /// ascii-lowercase name. SHOW names its column this way. A rollback
-    /// keeps the parameter defined, so it keeps this name too.
-    names_as_defined: HashMap<String, String>,
+    /// Each parameter's name as written when it was first set. SHOW names
+    /// its column this way. A rollback keeps the parameter defined, so it
+    /// keeps this name too.
+    names_as_defined: HashMap<SettingKey, String>,
+    /// The value RESET gives each parameter that has one: its startup value
+    /// or its default.
+    reset_values: HashMap<SettingKey, String>,
+}
+
+/// A parameter name in ASCII lowercase, since the case of a parameter name
+/// does not matter in PostgreSQL.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct SettingKey(String);
+
+impl SettingKey {
+    fn new(name: &str) -> Self {
+        Self(name.to_ascii_lowercase())
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -114,8 +157,8 @@ pub(crate) struct SettingValues {
     search_path: Setting<Option<Vec<String>>>,
     /// The role set with SET ROLE, or `None` for the session's login role.
     role: Setting<Option<SetRole>>,
-    /// Custom parameters, by ascii-lowercase name. Also contains the `search_path` as the user entered it.
-    named: HashMap<String, Setting<Option<String>>>,
+    /// Stored and custom parameters. Also contains the `search_path` as the user entered it.
+    named: HashMap<SettingKey, Setting<Option<String>>>,
     /// whether this struct contains any LOCAL values
     has_transaction_values: bool,
 }
@@ -151,11 +194,15 @@ struct Setting<T> {
 
 impl ConnectionSettings {
     pub(crate) fn get(&self, name: &str) -> Option<&str> {
-        self.current.named.get(name)?.current().as_deref()
+        self.current
+            .named
+            .get(&SettingKey::new(name))?
+            .current()
+            .as_deref()
     }
 
     pub(crate) fn contains(&self, name: &str) -> bool {
-        self.current.named.contains_key(name)
+        self.names_as_defined.contains_key(&SettingKey::new(name))
     }
 
     pub(crate) fn current_values(&self) -> &SettingValues {
@@ -195,19 +242,62 @@ impl ConnectionSettings {
         self.current.has_transaction_values |= scope == SettingScope::Transaction;
     }
 
-    pub(crate) fn set(&mut self, name: &str, value: Option<String>, scope: SettingScope) {
-        let key = name.to_ascii_lowercase();
+    /// Sets the built-in `parameter` to `value`, or resets it when `value` is
+    /// `None`. `search_path` has no reset value, so a reset leaves it with no
+    /// value and it shows as its default.
+    pub(crate) fn set(
+        &mut self,
+        parameter: &BuiltInParameter,
+        value: Option<String>,
+        scope: SettingScope,
+    ) {
+        self.set_named(parameter.name, value, scope);
+    }
+
+    /// Sets the custom parameter `name` to `value`, or resets it when `value`
+    /// is `None`. A custom parameter without a reset value then shows as
+    /// empty.
+    pub(crate) fn set_custom(
+        &mut self,
+        name: CustomName<'_>,
+        value: Option<String>,
+        scope: SettingScope,
+    ) {
+        self.set_named(name.as_str(), value, scope);
+    }
+
+    fn set_named(&mut self, name: &str, value: Option<String>, scope: SettingScope) {
+        let key = SettingKey::new(name);
         self.names_as_defined
             .entry(key.clone())
             .or_insert_with(|| name.to_owned());
+        let value = value.or_else(|| self.reset_values.get(&key).cloned());
         self.current.named.entry(key).or_default().set(value, scope);
         self.current.has_transaction_values |= scope == SettingScope::Transaction;
     }
 
-    /// Sets every named parameter to its default value for the session.
+    /// Gives the built-in `parameter` the value it starts the session with,
+    /// which RESET returns it to.
+    fn define(&mut self, parameter: &BuiltInParameter, value: String) {
+        self.define_named(parameter.name, value);
+    }
+
+    /// Gives the custom parameter `name` the value it starts the session
+    /// with, which RESET returns it to.
+    fn define_custom(&mut self, name: CustomName<'_>, value: String) {
+        self.define_named(name.as_str(), value);
+    }
+
+    fn define_named(&mut self, name: &str, value: String) {
+        self.reset_values.insert(SettingKey::new(name), value);
+        self.set_named(name, None, SettingScope::Session);
+    }
+
+    /// Resets every named parameter for the session.
     pub(crate) fn reset_all(&mut self) {
-        for setting in self.current.named.values_mut() {
-            setting.set(None, SettingScope::Session);
+        let names: Vec<String> = self.names_as_defined.values().cloned().collect();
+        for name in names {
+            self.set_named(&name, None, SettingScope::Session);
         }
     }
 
@@ -311,242 +401,342 @@ impl<T> Setting<T> {
     }
 }
 
-pub(crate) enum ConfigParameter {
-    SearchPath,
-    Role,
-    ApplicationName,
-    Fixed(&'static FixedParameter),
-}
-
 pub(crate) enum Parameter<'a> {
-    BuiltIn(ConfigParameter),
+    BuiltIn(&'static BuiltInParameter),
     Custom(&'a str),
 }
 
-pub(crate) fn find_parameter(name: &str) -> Option<Parameter<'_>> {
-    let parameter = if name.eq_ignore_ascii_case("search_path") {
-        ConfigParameter::SearchPath
-    } else if name.eq_ignore_ascii_case("role") {
-        ConfigParameter::Role
-    } else if name.eq_ignore_ascii_case("application_name") {
-        ConfigParameter::ApplicationName
-    } else if let Some(parameter) = FIXED_PARAMETERS
+/// Finds the parameter `name`. A name with a dot is a custom parameter, as in
+/// PostgreSQL. Any other name that is not built in is refused.
+pub(crate) fn find_parameter(name: &str) -> turso_core::Result<Parameter<'_>> {
+    if let Some(parameter) = PARAMETERS
         .iter()
         .find(|parameter| parameter.name.eq_ignore_ascii_case(name))
     {
-        ConfigParameter::Fixed(parameter)
+        Ok(Parameter::BuiltIn(parameter))
+    } else if name.contains('.') {
+        Ok(Parameter::Custom(name))
     } else {
-        return name.contains('.').then_some(Parameter::Custom(name));
-    };
-    Some(Parameter::BuiltIn(parameter))
+        Err(feature_not_supported(format!(
+            "parameter \"{name}\" is not supported"
+        )))
+    }
 }
 
-impl ConfigParameter {
+/// Gives a setting the value of one parameter of a client's startup message.
+/// `user` and `database` are not settings, so they set nothing.
+fn define_startup_value(
+    settings: &mut ConnectionSettings,
+    name: &str,
+    value: &str,
+) -> turso_core::Result<()> {
+    match name {
+        // tursopg serves one database as one built-in user.
+        "user" | "database" => Ok(()),
+        "options" => Err(feature_not_supported(
+            "the startup parameter \"options\" is not supported; use SET after connecting",
+        )),
+        "replication" => Err(feature_not_supported(
+            "replication connections are not supported",
+        )),
+        _ if name.starts_with("_pq_.") => Err(feature_not_supported(format!(
+            "protocol extension \"{name}\" is not supported"
+        ))),
+        _ => match find_parameter(name)? {
+            Parameter::BuiltIn(parameter) => {
+                settings.define(parameter, parameter.startup_value(value)?);
+                Ok(())
+            }
+            Parameter::Custom(name) => {
+                settings.define_custom(CustomName::new(name)?, value.to_owned());
+                Ok(())
+            }
+        },
+    }
+}
+
+/// Sets the parameter `name` to `value`, or resets it when `value` is `None`,
+/// as set_config does, and returns the value SHOW reports afterwards.
+pub(crate) fn set_parameter(
+    conn: &Connection,
+    name: &str,
+    value: Option<&str>,
+    scope: SettingScope,
+) -> turso_core::Result<String> {
+    match find_parameter(name)? {
+        Parameter::BuiltIn(parameter) => parameter.set(conn, value, scope),
+        Parameter::Custom(name) => crate::session::set_custom_parameter(conn, name, value, scope),
+    }
+}
+
+/// The parameters whose values a server sends its client when the session
+/// starts.
+pub(crate) fn reported_parameters(conn: &Connection) -> HashMap<String, String> {
+    PARAMETERS
+        .iter()
+        .filter(|parameter| parameter.reported)
+        .map(|parameter| (parameter.name.to_owned(), parameter.get(conn)))
+        .collect()
+}
+
+pub(crate) fn unrecognized_parameter(name: &str) -> turso_core::LimboError {
+    crate::error::sqlstate_error(
+        turso_pg_parser::sqlstate::SQLSTATE_UNDEFINED_OBJECT,
+        format!("unrecognized configuration parameter \"{name}\""),
+    )
+}
+
+fn feature_not_supported(message: impl Into<String>) -> turso_core::LimboError {
+    crate::error::sqlstate_error(
+        turso_pg_parser::sqlstate::SQLSTATE_FEATURE_NOT_SUPPORTED,
+        message,
+    )
+}
+
+pub(crate) struct BuiltInParameter {
+    name: &'static str,
+    /// Whether a server sends the value to its client when the session
+    /// starts, as PostgreSQL 17 does for the parameters it marks GUC_REPORT.
+    reported: bool,
+    pub(crate) kind: Kind,
+}
+
+pub(crate) enum Kind {
+    SearchPath,
+    Role,
+    /// A value the session keeps as text. It accepts only the values that
+    /// tursopg implements.
+    Stored {
+        default: &'static str,
+        accepts: Accepts,
+    },
+}
+
+impl BuiltInParameter {
+    /// Sets the parameter to `value`, or resets it when `value` is `None`,
+    /// and returns the value SHOW reports afterwards.
     pub(crate) fn set(
         &self,
         conn: &Connection,
         value: Option<&str>,
         scope: SettingScope,
     ) -> turso_core::Result<String> {
-        match self {
-            Self::SearchPath => crate::session::set_search_path(conn, value, scope),
-            Self::Role => crate::session::set_role(conn, value, scope),
-            Self::ApplicationName => {
-                crate::session::session_state(conn)?.mutate(conn, |settings| {
-                    settings.set(self.name(), value.map(str::to_owned), scope);
+        match &self.kind {
+            Kind::SearchPath => crate::session::set_search_path(conn, value, scope),
+            Kind::Role => crate::session::set_role(conn, value, scope),
+            Kind::Stored { default, accepts } => {
+                let value = value
+                    .map(|value| self.stored_value(default, accepts, value))
+                    .transpose()?;
+                session_state(conn).mutate(conn, |settings| {
+                    settings.set(self, value, scope);
                 });
-                Ok(value.unwrap_or_default().to_owned())
+                Ok(self.get(conn))
             }
-            Self::Fixed(parameter) => {
-                if let Some(value) = value {
-                    parameter.validate(value)?;
-                }
-                Ok(parameter.value.to_owned())
-            }
+        }
+    }
+
+    fn startup_value(&self, value: &str) -> turso_core::Result<String> {
+        match &self.kind {
+            // search_path and role keep no startup value for RESET to return to.
+            Kind::SearchPath | Kind::Role => Err(feature_not_supported(format!(
+                "the startup parameter \"{}\" is not supported; use SET after connecting",
+                self.name
+            ))),
+            Kind::Stored { default, accepts } => self.stored_value(default, accepts, value),
         }
     }
 
     pub(crate) fn get(&self, conn: &Connection) -> String {
-        match self {
-            Self::SearchPath => crate::session::search_path_setting(conn)
+        match &self.kind {
+            Kind::SearchPath => crate::session::search_path_setting(conn)
                 .unwrap_or_else(|| crate::session::DEFAULT_SEARCH_PATH.to_owned()),
-            Self::Role => conn
-                .context::<PgSessionState>()
-                .and_then(PgSessionState::role_name)
+            Kind::Role => session_state(conn)
+                .role_name()
                 .unwrap_or_else(|| "none".to_owned()),
-            Self::ApplicationName => conn
-                .context::<PgSessionState>()
-                .and_then(|state| state.setting(self.name()))
-                .unwrap_or_default(),
-            Self::Fixed(parameter) => parameter.value.to_owned(),
+            Kind::Stored { .. } => session_state(conn)
+                .setting(self.name)
+                .expect("a stored parameter has a value from the start of the session"),
         }
     }
 
     pub(crate) fn name(&self) -> &'static str {
-        match self {
-            Self::SearchPath => "search_path",
-            Self::Role => "role",
-            Self::ApplicationName => "application_name",
-            Self::Fixed(parameter) => parameter.name,
-        }
+        self.name
     }
 
     pub(crate) fn accepts_list(&self) -> bool {
         matches!(
-            self,
-            Self::Fixed(FixedParameter {
-                validation: FixedValidation::DateStyle,
+            self.kind,
+            Kind::Stored {
+                accepts: Accepts::DateStyle,
                 ..
-            })
+            }
         )
     }
-}
 
-pub(crate) struct FixedParameter {
-    name: &'static str,
-    value: &'static str,
-    validation: FixedValidation,
-}
-
-enum FixedValidation {
-    Exact,
-    Identifier,
-    Bool(bool),
-    DateStyle,
-    Encoding,
-    FloatDigits,
-}
-
-impl FixedParameter {
-    fn validate(&self, value: &str) -> turso_core::Result<()> {
-        let value_trimmed = value.trim();
-        let valid = match self.validation {
-            FixedValidation::Exact => value_trimmed.eq_ignore_ascii_case(self.value),
-            FixedValidation::Identifier => value == self.value,
-            FixedValidation::Bool(expected) => {
-                crate::functions::parse_pg_bool(value_trimmed) == Some(expected)
-            }
-            FixedValidation::DateStyle => {
-                let parts: Vec<_> = value_trimmed.split(',').map(str::trim).collect();
-                matches!(parts.as_slice(), [style] if style.eq_ignore_ascii_case("iso") || style.eq_ignore_ascii_case("mdy"))
-                    || matches!(parts.as_slice(), [style, order] if
-                        (style.eq_ignore_ascii_case("iso") && order.eq_ignore_ascii_case("mdy")) ||
-                        (style.eq_ignore_ascii_case("mdy") && order.eq_ignore_ascii_case("iso")))
-            }
-            FixedValidation::Encoding => ["UTF8", "UTF-8", "UNICODE"]
-                .iter()
-                .any(|encoding| value_trimmed.eq_ignore_ascii_case(encoding)),
-            FixedValidation::FloatDigits => matches!(value_trimmed.parse::<i32>(), Ok(1..=3)),
-        };
-        if valid {
-            Ok(())
-        } else {
-            Err(crate::error::sqlstate_error(
-                turso_pg_parser::sqlstate::SQLSTATE_INVALID_PARAMETER_VALUE,
-                format!(
-                    "invalid value for parameter \"{}\": \"{value}\"; supported value is \"{}\"",
-                    self.name, self.value
-                ),
-            ))
+    /// The value SHOW reports after the parameter is set to `value`.
+    fn stored_value(
+        &self,
+        default: &'static str,
+        accepts: &Accepts,
+        value: &str,
+    ) -> turso_core::Result<String> {
+        match accepts.stored_value(value, default) {
+            Some(stored) => Ok(stored.to_owned()),
+            None => Err(feature_not_supported(format!(
+                "parameter \"{}\" does not support value \"{value}\"; supported: {}",
+                self.name,
+                accepts.supported(default)
+            ))),
         }
     }
 }
 
-// These fixed settings are mainly compatibility stubs for pg_dump, including
-// gateways that validate its SET commands through set_config. They report modes
-// already in effect; they do not implement configurable PostgreSQL behavior such
-// as timeouts, RLS, or alternate date formats. Unsupported values must error.
-const FIXED_PARAMETERS: &[FixedParameter] = &[
-    FixedParameter {
-        name: "DateStyle",
-        value: "ISO, MDY",
-        validation: FixedValidation::DateStyle,
-    },
-    FixedParameter {
-        name: "IntervalStyle",
-        value: "postgres",
-        validation: FixedValidation::Exact,
-    },
-    FixedParameter {
-        name: "client_encoding",
-        value: "UTF8",
-        validation: FixedValidation::Encoding,
-    },
-    FixedParameter {
-        name: "standard_conforming_strings",
-        value: "on",
-        validation: FixedValidation::Bool(true),
-    },
-    FixedParameter {
-        name: "extra_float_digits",
-        value: "1",
-        validation: FixedValidation::FloatDigits,
-    },
-    FixedParameter {
-        name: "statement_timeout",
-        value: "0",
-        validation: FixedValidation::Exact,
-    },
-    FixedParameter {
-        name: "lock_timeout",
-        value: "0",
-        validation: FixedValidation::Exact,
-    },
-    FixedParameter {
-        name: "idle_in_transaction_session_timeout",
-        value: "0",
-        validation: FixedValidation::Exact,
-    },
-    FixedParameter {
-        name: "transaction_timeout",
-        value: "0",
-        validation: FixedValidation::Exact,
-    },
-    FixedParameter {
-        name: "row_security",
-        value: "off",
-        validation: FixedValidation::Bool(false),
-    },
-    FixedParameter {
-        name: "quote_all_identifiers",
-        value: "off",
-        validation: FixedValidation::Bool(false),
-    },
-    FixedParameter {
-        name: "check_function_bodies",
-        value: "off",
-        validation: FixedValidation::Bool(false),
-    },
-    FixedParameter {
-        name: "synchronize_seqscans",
-        value: "off",
-        validation: FixedValidation::Bool(false),
-    },
-    FixedParameter {
-        name: "default_tablespace",
-        value: "",
-        validation: FixedValidation::Identifier,
-    },
-    FixedParameter {
-        name: "default_table_access_method",
-        value: "heap",
-        validation: FixedValidation::Identifier,
-    },
-    FixedParameter {
-        name: "xmloption",
-        value: "content",
-        validation: FixedValidation::Exact,
-    },
-    FixedParameter {
-        name: "client_min_messages",
-        value: "warning",
-        validation: FixedValidation::Exact,
-    },
+pub(crate) enum Accepts {
+    /// The default, in any ASCII case.
+    DefaultAnyCase,
+    /// The default, exactly.
+    Default,
+    /// A PostgreSQL spelling of this boolean.
+    Bool(bool),
+    /// The ISO output style and the MDY input order.
+    DateStyle,
+    /// A name of the UTF8 encoding.
+    ClientEncoding,
+    /// 1, 2 or 3. For each of them PostgreSQL 12 and later print the
+    /// shortest text that reads back as the same float, as tursopg does.
+    FloatDigits,
+    /// One of the names of UTC whose output is the same in PostgreSQL.
+    Utc,
+    /// Printable ASCII of at most 63 bytes, which PostgreSQL stores as given.
+    PrintableAscii,
+}
+
+impl Accepts {
+    /// The value SHOW reports after the parameter is set to `value`, or
+    /// `None` if tursopg does not support `value`.
+    fn stored_value<'a>(&self, value: &'a str, default: &'static str) -> Option<&'a str> {
+        match self {
+            Self::DefaultAnyCase => value.eq_ignore_ascii_case(default).then_some(default),
+            Self::Default => (value == default).then_some(default),
+            Self::Bool(expected) => {
+                (crate::functions::parse_bool_setting(value) == Some(*expected)).then_some(default)
+            }
+            // PostgreSQL reads each comma-separated word as an output style or
+            // an input order; US, NONEURO and NONEUROPEAN are names of MDY.
+            Self::DateStyle => value
+                .split(',')
+                .map(str::trim)
+                .all(|word| {
+                    ["iso", "mdy", "us", "noneuro", "noneuropean"]
+                        .iter()
+                        .any(|name| word.eq_ignore_ascii_case(name))
+                })
+                .then_some(default),
+            // PostgreSQL skips every character of an encoding name that is
+            // not a letter or digit, so `'utf-8'` with its quotes names UTF8.
+            // PostgreSQL reads only the first 63 bytes of a longer name, so tursopg
+            // refuses longer names.
+            Self::ClientEncoding => {
+                if value.len() > 63 {
+                    return None;
+                }
+                let name: String = value
+                    .chars()
+                    .filter(char::is_ascii_alphanumeric)
+                    .map(|c| c.to_ascii_lowercase())
+                    .collect();
+                matches!(name.as_str(), "utf8" | "unicode").then_some(default)
+            }
+            Self::FloatDigits => matches!(value, "1" | "2" | "3").then_some(value),
+            Self::Utc => ["UTC", "Etc/UTC"]
+                .into_iter()
+                .find(|zone| zone.eq_ignore_ascii_case(value)),
+            Self::PrintableAscii => (value.len() <= 63
+                && value.bytes().all(|byte| matches!(byte, b' '..=b'~')))
+            .then_some(value),
+        }
+    }
+
+    fn supported(&self, default: &str) -> String {
+        match self {
+            Self::DefaultAnyCase
+            | Self::Default
+            | Self::Bool(_)
+            | Self::DateStyle
+            | Self::ClientEncoding => format!("\"{default}\""),
+            Self::FloatDigits => "\"1\", \"2\", \"3\"".to_owned(),
+            Self::Utc => "\"UTC\", \"Etc/UTC\"".to_owned(),
+            Self::PrintableAscii => "printable ASCII text of at most 63 bytes".to_owned(),
+        }
+    }
+}
+
+/// Every parameter that tursopg knows besides custom ones. Many stored
+/// parameters exist for the SET commands that pg_dump and drivers send; they
+/// accept only the modes tursopg works in, since tursopg implements no
+/// timeouts, row-level security bypass or other date formats.
+static PARAMETERS: &[BuiltInParameter] = &[
+    SEARCH_PATH,
+    parameter("role", Kind::Role),
+    reported("application_name", stored("", Accepts::PrintableAscii)),
+    reported("client_encoding", stored("UTF8", Accepts::ClientEncoding)),
+    reported("DateStyle", stored("ISO, MDY", Accepts::DateStyle)),
+    reported("IntervalStyle", stored("postgres", Accepts::DefaultAnyCase)),
+    reported(
+        "standard_conforming_strings",
+        stored("on", Accepts::Bool(true)),
+    ),
+    reported("TimeZone", stored("Etc/UTC", Accepts::Utc)),
+    parameter("extra_float_digits", stored("1", Accepts::FloatDigits)),
+    parameter("statement_timeout", stored("0", Accepts::Default)),
+    parameter("lock_timeout", stored("0", Accepts::Default)),
+    parameter(
+        "idle_in_transaction_session_timeout",
+        stored("0", Accepts::Default),
+    ),
+    parameter("transaction_timeout", stored("0", Accepts::Default)),
+    parameter("row_security", stored("off", Accepts::Bool(false))),
+    parameter("quote_all_identifiers", stored("off", Accepts::Bool(false))),
+    parameter("check_function_bodies", stored("off", Accepts::Bool(false))),
+    parameter("synchronize_seqscans", stored("off", Accepts::Bool(false))),
+    parameter("default_tablespace", stored("", Accepts::Default)),
+    parameter(
+        "default_table_access_method",
+        stored("heap", Accepts::Default),
+    ),
+    parameter("xmloption", stored("content", Accepts::DefaultAnyCase)),
+    parameter(
+        "client_min_messages",
+        stored("warning", Accepts::DefaultAnyCase),
+    ),
 ];
+
+pub(crate) const SEARCH_PATH: BuiltInParameter = parameter("search_path", Kind::SearchPath);
+
+const fn parameter(name: &'static str, kind: Kind) -> BuiltInParameter {
+    BuiltInParameter {
+        name,
+        reported: false,
+        kind,
+    }
+}
+
+const fn reported(name: &'static str, kind: Kind) -> BuiltInParameter {
+    BuiltInParameter {
+        name,
+        reported: true,
+        kind,
+    }
+}
+
+const fn stored(default: &'static str, accepts: Accepts) -> Kind {
+    Kind::Stored { default, accepts }
+}
 
 #[cfg(test)]
 mod tests {
-    use super::{find_parameter, ConfigParameter, Parameter, FIXED_PARAMETERS};
+    use super::{find_parameter, Kind, Parameter, PARAMETERS};
 
     #[test]
     fn config_parameter_parses_sql_names() {
@@ -554,12 +744,12 @@ mod tests {
             assert!(
                 matches!(
                     find_parameter(name),
-                    Some(Parameter::BuiltIn(ConfigParameter::SearchPath))
+                    Ok(Parameter::BuiltIn(parameter)) if matches!(parameter.kind, Kind::SearchPath)
                 ),
                 "{name}"
             );
         }
-        for parameter in FIXED_PARAMETERS {
+        for parameter in PARAMETERS {
             for name in [
                 parameter.name.to_ascii_lowercase(),
                 parameter.name.to_ascii_uppercase(),
@@ -567,14 +757,14 @@ mod tests {
                 assert!(
                     matches!(
                         find_parameter(&name),
-                        Some(Parameter::BuiltIn(ConfigParameter::Fixed(_)))
+                        Ok(Parameter::BuiltIn(found)) if std::ptr::eq(found, parameter)
                     ),
                     "{name}"
                 );
             }
         }
         for name in ["", "SearchPath", "search_path "] {
-            assert!(find_parameter(name).is_none(), "{name}");
+            assert!(find_parameter(name).is_err(), "{name}");
         }
     }
 }

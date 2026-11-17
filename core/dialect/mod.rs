@@ -23,7 +23,8 @@ use crate::{
     schema::{BTreeTable, RelationKind, Schema, SchemaBuilder},
     security::{policy::RowPolicy, roles::RoleId},
     vdbe::{builder::ProgramBuilder, Register},
-    Clock, CollationSeq, Connection, Func, LimboError, OpenOptions, Result, Value, IO,
+    Clock, CollationSeq, Connection, ConnectionContext, Func, LimboError, OpenOptions, Result,
+    Value, IO,
 };
 use std::{any::Any, sync::Arc};
 use turso_parser::ast::{
@@ -177,6 +178,13 @@ pub trait Dialect: Send + Sync + 'static {
     /// created with; the process-wide database registry uses this name to
     /// reject an open whose dialect differs from the already-open instance.
     fn name(&self) -> &'static str;
+
+    /// The context of a new connection, from the context its creator gave,
+    /// which may be empty. A frontend that keeps its session state there
+    /// gives it to every connection.
+    fn connection_context(&self, given: ConnectionContext) -> Result<ConnectionContext> {
+        Ok(given)
+    }
 
     fn format_error(&self, error: LimboError) -> LimboError {
         error.into_sqlite_error()

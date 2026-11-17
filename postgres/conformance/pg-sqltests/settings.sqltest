@@ -310,12 +310,18 @@ expect {
     content
 }
 
+# tursopg refuses every value it does not support with one error, including
+# values that PostgreSQL itself rejects as invalid.
 test builtin-invalid-datestyle-function {
     SELECT set_config('datestyle', 'bogus', true);
 }
 @sqlstate 22023
 expect error {
     invalid value for parameter "DateStyle"
+}
+@sqlstate 0A000
+expect @tursopg error {
+    parameter "DateStyle" does not support value "bogus"; supported: "ISO, MDY"
 }
 
 test builtin-invalid-datestyle-set {
@@ -324,6 +330,152 @@ test builtin-invalid-datestyle-set {
 @sqlstate 22023
 expect error {
     invalid value for parameter "DateStyle"
+}
+@sqlstate 0A000
+expect @tursopg error {
+    parameter "DateStyle" does not support value "bogus"; supported: "ISO, MDY"
+}
+
+# tursopg works in UTC with ISO dates, PostgreSQL intervals and UTF8, so it
+# refuses the values that would change those in PostgreSQL. One test for each
+# kind of check.
+test set-unsupported-timezone {
+    SET TimeZone = 'Europe/Helsinki';
+    SHOW TimeZone;
+}
+expect {
+    Europe/Helsinki
+}
+@sqlstate 0A000
+expect @tursopg error {
+    parameter "TimeZone" does not support value "Europe/Helsinki"; supported: "UTC", "Etc/UTC"
+}
+
+test set-unsupported-intervalstyle {
+    SET IntervalStyle = iso_8601;
+    SHOW IntervalStyle;
+}
+expect {
+    iso_8601
+}
+@sqlstate 0A000
+expect @tursopg error {
+    parameter "IntervalStyle" does not support value "iso_8601"; supported: "postgres"
+}
+
+test set-unsupported-statement-timeout {
+    SET statement_timeout = '5s';
+    SHOW statement_timeout;
+}
+expect {
+    5s
+}
+@sqlstate 0A000
+expect @tursopg error {
+    parameter "statement_timeout" does not support value "5s"; supported: "0"
+}
+
+test set-unsupported-standard-conforming-strings {
+    SET standard_conforming_strings = off;
+    SHOW standard_conforming_strings;
+}
+expect {
+    off
+}
+@sqlstate 0A000
+expect @tursopg error {
+    parameter "standard_conforming_strings" does not support value "off"; supported: "on"
+}
+
+test set-unsupported-extra-float-digits {
+    SET extra_float_digits = 0;
+    SHOW extra_float_digits;
+}
+expect {
+    0
+}
+@sqlstate 0A000
+expect @tursopg error {
+    parameter "extra_float_digits" does not support value "0"; supported: "1", "2", "3"
+}
+
+test set-unsupported-client-encoding {
+    SET client_encoding = LATIN1;
+    SHOW client_encoding;
+}
+expect {
+    LATIN1
+}
+@sqlstate 0A000
+expect @tursopg error {
+    parameter "client_encoding" does not support value "LATIN1"; supported: "UTF8"
+}
+
+test set-config-client-encoding-name-longer-than-63-bytes {
+    SELECT set_config('client_encoding', 'u' || repeat('-', 70) || 'tf8', false);
+}
+@sqlstate 22023
+expect error {
+    invalid value for parameter "client_encoding"
+}
+@sqlstate 0A000
+expect @tursopg error {
+    parameter "client_encoding" does not support value "u-{70}tf8"; supported: "UTF8"
+}
+
+test set-accepts-spellings-of-supported-values {
+    SET TimeZone = 'utc';
+    SHOW TimeZone;
+    SET DateStyle = US, iso;
+    SHOW DateStyle;
+    SET client_encoding = 'unicode';
+    SHOW client_encoding;
+    SET extra_float_digits = 3;
+    SHOW extra_float_digits;
+}
+expect {
+    UTC
+    ISO, MDY
+    UTF8
+    3
+}
+
+# PostgreSQL rewrites other bytes of application_name as \xNN escapes and cuts
+# it to 63 bytes. tursopg refuses such values instead of changing them.
+test set-application-name-longer-than-63-bytes {
+    SET application_name = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+    SELECT length(current_setting('application_name'));
+}
+expect {
+    63
+}
+@sqlstate 0A000
+expect @tursopg error {
+    parameter "application_name" does not support value "a{64}"; supported: printable ASCII text of at most 63 bytes
+}
+
+test set-application-name-with-non-ascii-text {
+    SET application_name = 'café';
+    SELECT length(current_setting('application_name'));
+}
+expect {
+    11
+}
+@sqlstate 0A000
+expect @tursopg error {
+    parameter "application_name" does not support value "café"; supported: printable ASCII text of at most 63 bytes
+}
+
+test set-unknown-parameter-errors {
+    SET no_such_parameter = 1;
+}
+@sqlstate 42704
+expect error {
+    unrecognized configuration parameter "no_such_parameter"
+}
+@sqlstate 0A000
+expect @tursopg error {
+    parameter "no_such_parameter" is not supported
 }
 
 test builtin-application-name-local-reset-and-from-current {

@@ -133,7 +133,7 @@ pub use connection::{
     StorageStatsRead, SymbolTable,
 };
 pub(crate) use connection::{AtomicTransactionState, TransactionState};
-pub use connection_hooks::{ConnectionHooks, SavepointMemo};
+pub use connection_hooks::{ConnectionContext, ConnectionHooks, SavepointMemo};
 pub use database::is_memory_like;
 #[cfg(feature = "simulator")]
 pub use database::{clear_database_registry, SharedWalTestingSnapshot};

@@ -2564,13 +2564,7 @@ impl Database {
         opts: ConnectOpts,
         context: Arc<C>,
     ) -> Result<Arc<Connection>> {
-        self.connect_with(
-            opts,
-            ConnectionContext {
-                value: Some(context),
-                hooks: None,
-            },
-        )
+        self.connect_with(opts, ConnectionContext::Value(context))
     }
 
     /// Connects with `opts`, and with `hooks` as the hooks that the
@@ -2581,13 +2575,7 @@ impl Database {
         opts: ConnectOpts,
         hooks: Arc<C>,
     ) -> Result<Arc<Connection>> {
-        self.connect_with(
-            opts,
-            ConnectionContext {
-                value: Some(hooks.clone()),
-                hooks: Some(hooks),
-            },
-        )
+        self.connect_with(opts, ConnectionContext::Hooks(hooks))
     }
 
     fn connect_with(
@@ -2753,11 +2741,12 @@ impl Database {
         default_cache_size: i32,
         context: ConnectionContext,
     ) -> Result<Arc<Connection>> {
+        let (context, hooks) = self.dialect().connection_context(context)?.into_parts();
         let encryption_cipher = self.encryption_cipher_mode.get();
         let conn = Arc::new(Connection {
             db: self.clone(),
-            context: context.value,
-            hooks: context.hooks,
+            context,
+            hooks,
             pager: ArcSwap::new(pager),
             schema: RwLock::new(self.schema.lock().clone()),
             database_schemas: RwLock::new(HashMap::default()),

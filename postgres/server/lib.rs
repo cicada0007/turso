@@ -1,8 +1,9 @@
+use std::collections::HashMap;
 use std::fmt::Debug;
 use std::num::NonZero;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
-    Arc,
+    Arc, OnceLock,
 };
 
 use async_trait::async_trait;
@@ -15,9 +16,13 @@ use turso_pg::{
 };
 use turso_pg_parser::cmdtag::CommandTag;
 use turso_pg_parser::copy::{parse_copy_to_stdout, CopyToStdout};
+use turso_pg_parser::sqlstate::SQLSTATE_PROTOCOL_VIOLATION;
 use turso_pg_parser::ParseResult;
 
-use pgwire::api::auth::StartupHandler;
+use pgwire::api::auth::{
+    finish_authentication, protocol_negotiation, DefaultServerParameterProvider,
+    ServerParameterProvider, StartupHandler,
+};
 use pgwire::api::portal::{Format, Portal};
 use pgwire::api::query::{
     send_execution_response, send_query_response, send_ready_for_query, ExtendedQueryHandler,
@@ -30,7 +35,7 @@ use pgwire::api::results::{
 use pgwire::api::stmt::{NoopQueryParser, StoredStatement};
 use pgwire::api::store::PortalStore;
 use pgwire::api::{
-    ClientInfo, ClientPortalStore, NoopHandler, PgWireConnectionState, PgWireServerHandlers, Type,
+    ClientInfo, ClientPortalStore, PgWireConnectionState, PgWireServerHandlers, Type,
 };
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 use pgwire::messages::copy::{CopyData, CopyDone, CopyOutResponse};
@@ -40,7 +45,7 @@ use pgwire::messages::response::{
     EmptyQueryResponse, ErrorResponse, ReadyForQuery, TransactionStatus,
 };
 use pgwire::messages::simplequery::Query;
-use pgwire::messages::PgWireBackendMessage;
+use pgwire::messages::{PgWireBackendMessage, PgWireFrontendMessage};
 use pgwire::tokio::process_socket;
 use pgwire::types::format::FormatOptions;
 
@@ -97,28 +102,22 @@ impl TursoPgServer {
                     match result {
                         Ok((socket, addr)) => {
                             info!("PostgreSQL client connected from {}", addr);
-                            let session = match PgConnection::connect_with(
-                                &self.db,
+                            let handler = Arc::new(TursoPgHandler::new(
+                                self.db.clone(),
                                 self.connect_opts.clone(),
-                            ) {
-                                Ok(session) => session,
-                                Err(e) => {
-                                    error!("Error opening a session for {}: {}", addr, e);
-                                    continue;
-                                }
-                            };
+                            ));
                             let factory = Arc::new(TursoPgFactory {
-                                handler: Arc::new(TursoPgHandler {
-                                    conn: session.clone(),
-                                    query_parser: Arc::new(NoopQueryParser::new()),
-                                }),
+                                handler: handler.clone(),
                             });
                             tokio::spawn(async move {
                                 if let Err(e) = process_socket(socket, None, factory).await {
                                     error!("Error processing connection from {}: {}", addr, e);
                                 }
-                                if let Err(e) = session.close() {
-                                    error!("Error closing the session of {}: {}", addr, e);
+                                // A client that failed startup has no session.
+                                if let Some(session) = handler.session.get() {
+                                    if let Err(e) = session.close() {
+                                        error!("Error closing the session of {}: {}", addr, e);
+                                    }
                                 }
                             });
                         }
@@ -144,8 +143,36 @@ impl TursoPgServer {
 }
 
 struct TursoPgHandler {
-    conn: PgConnection,
+    db: Arc<Database>,
+    connect_opts: ConnectOpts,
+    /// The client's session, which on_startup opens with the client's
+    /// startup parameters.
+    session: OnceLock<PgConnection>,
     query_parser: Arc<NoopQueryParser>,
+}
+
+impl TursoPgHandler {
+    fn new(db: Arc<Database>, connect_opts: ConnectOpts) -> Self {
+        Self {
+            db,
+            connect_opts,
+            session: OnceLock::new(),
+            query_parser: Arc::new(NoopQueryParser::new()),
+        }
+    }
+
+    /// pgwire keeps reading messages after a FATAL startup error, so a client
+    /// that sends a query in the same packet as a refused startup message
+    /// reaches the query handlers without a session.
+    fn session(&self) -> PgWireResult<&PgConnection> {
+        self.session.get().ok_or_else(|| {
+            PgWireError::UserError(Box::new(ErrorInfo::new(
+                "FATAL".to_owned(),
+                SQLSTATE_PROTOCOL_VIOLATION.to_owned(),
+                "the session did not start".to_owned(),
+            )))
+        })
+    }
 }
 
 struct TursoPgFactory {
@@ -162,8 +189,66 @@ impl PgWireServerHandlers for TursoPgFactory {
     }
 
     fn startup_handler(&self) -> Arc<impl StartupHandler> {
-        Arc::new(NoopHandler)
+        self.handler.clone()
     }
+}
+
+#[async_trait]
+impl StartupHandler for TursoPgHandler {
+    /// Opens the client's session with its startup parameters and reports
+    /// the session's parameter values. tursopg asks for no password.
+    async fn on_startup<C>(
+        &self,
+        client: &mut C,
+        message: PgWireFrontendMessage,
+    ) -> PgWireResult<()>
+    where
+        C: ClientInfo + Sink<PgWireBackendMessage> + Unpin + Send + Sync,
+        C::Error: Debug,
+        PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
+    {
+        let PgWireFrontendMessage::Startup(startup) = message else {
+            unreachable!("pgwire handles cancel requests itself and decodes every other message before authentication as a startup message");
+        };
+        protocol_negotiation(client, &startup).await?;
+        let session =
+            PgConnection::connect_with(&self.db, self.connect_opts.clone(), &startup.parameters)
+                .map_err(fatal_error)?;
+        let parameters = ReportedParameters(session.reported_parameters());
+        finish_authentication(client, &parameters).await?;
+        // pgwire keeps reading messages after a failed startup, so the
+        // handlers get a session only when startup succeeded.
+        if self.session.set(session).is_err() {
+            unreachable!("pgwire calls on_startup once per client");
+        }
+        Ok(())
+    }
+}
+
+/// The parameter values that the client receives when the session starts:
+/// pgwire's defaults, with the session's values of the parameters it keeps.
+struct ReportedParameters(HashMap<String, String>);
+
+impl ServerParameterProvider for ReportedParameters {
+    fn server_parameters<C>(&self, client: &C) -> Option<HashMap<String, String>>
+    where
+        C: ClientInfo,
+    {
+        let mut parameters = DefaultServerParameterProvider::default()
+            .server_parameters(client)
+            .expect("pgwire's default provider always gives parameters");
+        parameters.extend(self.0.clone());
+        Some(parameters)
+    }
+}
+
+/// An error before the session starts closes the connection, so PostgreSQL
+/// reports it as FATAL. pgwire's ErrorInfo has no table, column or
+/// constraint fields, so a FATAL error loses them.
+fn fatal_error(error: turso_pg::Error) -> PgWireError {
+    PgWireError::UserError(Box::new(ErrorInfo::from(ErrorResponse::new(error_fields(
+        &error, "FATAL",
+    )))))
 }
 
 #[async_trait]
@@ -175,7 +260,7 @@ impl SimpleQueryHandler for TursoPgHandler {
         PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
     {
         let result = self.run_simple_query(client, query).await;
-        let status = wire_transaction_status(&self.conn);
+        let status = wire_transaction_status(self.session()?);
         finish_query(client, result, false, status).await
     }
 
@@ -183,7 +268,7 @@ impl SimpleQueryHandler for TursoPgHandler {
     where
         C: ClientInfo + Unpin + Send + Sync,
     {
-        let conn = &self.conn;
+        let conn = self.session()?;
 
         // Per the PostgreSQL simple query protocol, a query string may contain
         // multiple semicolon-separated statements. Split and execute each one.
@@ -217,7 +302,7 @@ impl TursoPgHandler {
             return Err(PgWireError::NotReadyForQuery);
         }
         client.set_state(PgWireConnectionState::QueryInProgress);
-        let conn = &self.conn;
+        let conn = self.session()?;
         // Errors raised here never reach PgConnection::prepare, so report
         // them to the session: any error inside a transaction block aborts
         // the block.
@@ -315,7 +400,7 @@ impl ExtendedQueryHandler for TursoPgHandler {
         PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
     {
         let result = self._on_execute(client, message).await;
-        let status = wire_transaction_status(&self.conn);
+        let status = wire_transaction_status(self.session()?);
         finish_query(client, result, true, status).await
     }
 
@@ -327,7 +412,7 @@ impl ExtendedQueryHandler for TursoPgHandler {
         PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
     {
         let result = self._on_describe(client, message).await;
-        let status = wire_transaction_status(&self.conn);
+        let status = wire_transaction_status(self.session()?);
         finish_query(client, result, true, status).await
     }
 
@@ -344,7 +429,7 @@ impl ExtendedQueryHandler for TursoPgHandler {
     where
         C: ClientInfo + Unpin + Send + Sync,
     {
-        let conn = &self.conn;
+        let conn = self.session()?;
         let query = &portal.statement.statement;
 
         let mut stmt = conn.prepare(query).map_err(pg_error)?;
@@ -370,7 +455,7 @@ impl ExtendedQueryHandler for TursoPgHandler {
     where
         C: ClientInfo + Unpin + Send + Sync,
     {
-        let conn = &self.conn;
+        let conn = self.session()?;
         let stmt = conn.prepare(&target.statement).map_err(pg_error)?;
 
         let param_types: Vec<Type> = target
@@ -391,7 +476,7 @@ impl ExtendedQueryHandler for TursoPgHandler {
     where
         C: ClientInfo + Unpin + Send + Sync,
     {
-        let conn = &self.conn;
+        let conn = self.session()?;
         let stmt = conn
             .prepare(&portal.statement.statement)
             .map_err(pg_error)?;
@@ -897,24 +982,9 @@ where
         Ok(error) => error,
         Err(error) => return Err(PgWireError::ApiError(error)),
     };
-    let mut fields = vec![
-        (b'S', "ERROR".to_string()),
-        (b'C', error.sqlstate.to_string()),
-        (b'M', error_field_value(&error.message)),
-    ];
-    for (tag, value) in [
-        (b'D', &error.detail),
-        (b't', &error.table_name),
-        (b'c', &error.column_name),
-        (b'n', &error.constraint_name),
-    ] {
-        if let Some(value) = value {
-            fields.push((tag, error_field_value(value)));
-        }
-    }
     client
         .send(PgWireBackendMessage::ErrorResponse(ErrorResponse::new(
-            fields,
+            error_fields(&error, "ERROR"),
         )))
         .await?;
     client.set_transaction_status(status);
@@ -932,9 +1002,30 @@ where
     Ok(())
 }
 
+/// The fields of an ErrorResponse that reports `error` with `severity`.
+fn error_fields(error: &turso_pg::Error, severity: &str) -> Vec<(u8, String)> {
+    let mut fields = vec![
+        (b'S', severity.to_owned()),
+        (b'C', error.sqlstate.to_string()),
+        (b'M', error_field_value(&error.message)),
+    ];
+    for (tag, value) in [
+        (b'D', &error.detail),
+        (b't', &error.table_name),
+        (b'c', &error.column_name),
+        (b'n', &error.constraint_name),
+    ] {
+        if let Some(value) = value {
+            fields.push((tag, error_field_value(value)));
+        }
+    }
+    fields
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use turso_core::SessionRole;
 
     use turso_pg_client::{BackendEvent, ConnParams, PgConn};
 
@@ -953,7 +1044,7 @@ mod tests {
             .unwrap_or_else(|| panic!("{events:?}"));
         assert_eq!(
             fields.get(&b'M').map(String::as_str),
-            Some("unrecognized configuration parameter \"nodot"),
+            Some("parameter \"nodot"),
             "{fields:?}"
         );
         assert!(!fields.contains_key(&b'D'), "{fields:?}");
@@ -1152,34 +1243,7 @@ mod tests {
     }
 
     fn copy_test_client() -> (PgConn, PgConnection) {
-        let (_io, db) = turso_pg::open_database(
-            ":memory:",
-            None,
-            turso_pg::OpenFlags::default(),
-            turso_pg::DatabaseOpts::new().with_attach(true),
-        )
-        .unwrap();
-        let conn = PgConnection::connect(&db).unwrap();
-        let handler = Arc::new(TursoPgHandler {
-            conn: conn.clone(),
-            query_parser: Arc::new(NoopQueryParser::new()),
-        });
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        listener.set_nonblocking(true).unwrap();
-        std::thread::spawn(move || {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap()
-                .block_on(async move {
-                    let listener = TcpListener::from_std(listener).unwrap();
-                    let (socket, _) = listener.accept().await.unwrap();
-                    process_socket(socket, None, Arc::new(TursoPgFactory { handler }))
-                        .await
-                        .unwrap();
-                });
-        });
+        let (handler, address, _server) = serve_one_connection(Result::unwrap);
         let client = PgConn::connect(
             &ConnParams {
                 host: address.ip().to_string(),
@@ -1194,6 +1258,7 @@ mod tests {
         client
             .set_read_timeout(Some(std::time::Duration::from_secs(10)))
             .unwrap();
+        let conn = handler.session().unwrap().clone();
         (client, conn)
     }
 
@@ -1234,6 +1299,107 @@ mod tests {
                 return messages;
             }
         }
+    }
+
+    #[test]
+    fn query_in_the_packet_of_a_refused_startup_message_does_not_run() {
+        use std::io::{Read, Write};
+
+        // pgwire shuts down the socket after the FATAL startup error, then
+        // reads the query and writes its error to that socket. Unix reports
+        // that write as BrokenPipe or ConnectionReset. Windows reports it as
+        // WSAESHUTDOWN (10058), which has no ErrorKind of its own.
+        let (_handler, address, server) = serve_one_connection(|result| {
+            const WSAESHUTDOWN: i32 = 10058;
+            if let Err(error) = result {
+                assert!(
+                    matches!(
+                        error.kind(),
+                        std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
+                    ) || error.raw_os_error() == Some(WSAESHUTDOWN),
+                    "unexpected server error: {error}"
+                );
+            }
+        });
+
+        // Startup message: length, protocol version 3.0, name/value pairs.
+        let mut startup = 196608_i32.to_be_bytes().to_vec();
+        for text in ["user", "turso", "foo", "bar", ""] {
+            startup.extend(text.as_bytes());
+            startup.push(0);
+        }
+        let mut packet = (startup.len() as i32 + 4).to_be_bytes().to_vec();
+        packet.extend(startup);
+        packet.push(b'Q');
+        packet.extend((4 + "SELECT 1".len() as i32 + 1).to_be_bytes());
+        packet.extend(b"SELECT 1\0");
+
+        let mut socket = std::net::TcpStream::connect(address).unwrap();
+        socket
+            .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+            .unwrap();
+        socket.write_all(&packet).unwrap();
+        let mut response = Vec::new();
+        socket.read_to_end(&mut response).unwrap();
+        drop(socket);
+        server.join().expect("the server thread must not panic");
+
+        let mut message_types = Vec::new();
+        let mut rest = response.as_slice();
+        while let [message_type, l0, l1, l2, l3, ..] = *rest {
+            message_types.push(message_type);
+            let length = i32::from_be_bytes([l0, l1, l2, l3]) as usize;
+            rest = &rest[1 + length..];
+        }
+        assert_eq!(message_types.first(), Some(&b'E'), "{response:?}");
+        assert!(
+            response.windows(7).any(|field| field == b"SFATAL\0"),
+            "{response:?}"
+        );
+        assert!(!message_types.contains(&b'D'), "{response:?}");
+        assert!(!message_types.contains(&b'C'), "{response:?}");
+    }
+
+    /// Starts a server on a new in-memory database. It serves one client
+    /// connection on its own thread and passes how that connection ended to
+    /// `on_end`.
+    fn serve_one_connection(
+        on_end: fn(std::io::Result<()>),
+    ) -> (
+        Arc<TursoPgHandler>,
+        std::net::SocketAddr,
+        std::thread::JoinHandle<()>,
+    ) {
+        let (_io, db) = turso_pg::open_database(
+            ":memory:",
+            None,
+            turso_pg::OpenFlags::default(),
+            turso_pg::DatabaseOpts::new().with_attach(true),
+        )
+        .unwrap();
+        let handler = Arc::new(TursoPgHandler::new(
+            db,
+            ConnectOpts::new(SessionRole::Superuser),
+        ));
+        let server_handler = handler.clone();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let server = std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async move {
+                    let listener = TcpListener::from_std(listener).unwrap();
+                    let (socket, _) = listener.accept().await.unwrap();
+                    let factory = Arc::new(TursoPgFactory {
+                        handler: server_handler,
+                    });
+                    on_end(process_socket(socket, None, factory).await);
+                });
+        });
+        (handler, address, server)
     }
 
     #[test]

@@ -1,6 +1,8 @@
 use crate::functions::validate_pg_input;
 use crate::roles::{connection_roles, schema_roles, Role, RoleCatalog};
+use crate::settings::PgSessionState;
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
+use std::collections::BTreeMap;
 use std::fmt::{self, Debug, Display, Formatter};
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -16,8 +18,8 @@ use turso_core::{
         AUTOINCREMENT_SEQ_PREFIX,
     },
     security::roles::RoleId,
-    walk_expr_mut, Connection, Dialect, Func, IOResult, LimboError, NamespaceId, NamespaceRef,
-    OpenOptions, Result, Statement, Value, WalkControl, MAIN_DB_ID,
+    walk_expr_mut, Connection, ConnectionContext, Dialect, Func, IOResult, LimboError, NamespaceId,
+    NamespaceRef, OpenOptions, Result, Statement, Value, WalkControl, MAIN_DB_ID,
 };
 use turso_ext::{ConstraintInfo, IndexInfo, OrderByInfo, ResultCode, VTabKind};
 use turso_parser::ast::{self, RefAct, SortOrder};
@@ -52,6 +54,19 @@ pub struct PostgresDialect;
 impl Dialect for PostgresDialect {
     fn name(&self) -> &'static str {
         "postgres"
+    }
+
+    fn connection_context(&self, given: ConnectionContext) -> Result<ConnectionContext> {
+        if matches!(given, ConnectionContext::Empty) {
+            let state = PgSessionState::new(&BTreeMap::new())?;
+            return Ok(ConnectionContext::Hooks(Arc::new(state)));
+        }
+        if given.holds_hooks::<PgSessionState>() {
+            return Ok(given);
+        }
+        Err(LimboError::InternalError(
+            "a PostgreSQL connection's context must be its session state".to_string(),
+        ))
     }
 
     fn format_error(&self, error: LimboError) -> LimboError {

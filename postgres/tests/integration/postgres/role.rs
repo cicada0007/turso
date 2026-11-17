@@ -12,6 +12,7 @@ fn session_runs_as_the_role_it_was_opened_as() {
     let alice = PgConnection::connect_with(
         &db.db,
         ConnectOpts::new(SessionRole::Named("alice".to_string())),
+        &Default::default(),
     )
     .unwrap();
 
@@ -882,6 +883,7 @@ fn connect_as(db: &TempDatabase, name: &str) -> PgConnection {
     PgConnection::connect_with(
         &db.db,
         ConnectOpts::new(SessionRole::Named(name.to_string())),
+        &Default::default(),
     )
     .unwrap()
 }

@@ -1,6 +1,6 @@
 use chumsky::{error::EmptyErr, prelude::*};
 use std::borrow::Cow;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::num::NonZero;
 use std::str;
 use std::sync::Arc;
@@ -11,8 +11,8 @@ use crate::error::{in_failed_sql_transaction_error, sqlstate_error};
 use crate::pg_type::type_exists;
 use crate::roles::connection_roles;
 use crate::settings::{
-    find_parameter, ConfigParameter, ConnectionSettings, Parameter, PgSessionState, SetRole,
-    SettingScope,
+    find_parameter, unrecognized_parameter, BuiltInParameter, ConnectionSettings, Kind, Parameter,
+    PgSessionState, SetRole, SettingScope, SEARCH_PATH,
 };
 use crate::statement::{PgTxState, PostRunFn, StatementResultKind, TxRole};
 use turso_core::schema::Table;
@@ -60,8 +60,6 @@ pub enum TransactionState {
     Active,
     Aborted,
 }
-
-const SEARCH_PATH_SETTING: &str = "search_path";
 
 pub(crate) const DEFAULT_SEARCH_PATH: &str = "\"$user\", public";
 
@@ -144,16 +142,24 @@ fn refuse_a_file_with_tables_in_no_schema(
 
 impl PgConnection {
     pub fn connect(db: &Arc<turso_core::Database>) -> crate::Result<Self> {
-        Self::connect_with(db, turso_core::ConnectOpts::new(SessionRole::Superuser))
+        Self::connect_with(
+            db,
+            turso_core::ConnectOpts::new(SessionRole::Superuser),
+            &BTreeMap::new(),
+        )
     }
 
     /// Opens a session on `db`, connecting with `opts`, such as the
-    /// encryption key. The session has its own transaction and settings.
+    /// encryption key. The session has its own transaction and settings,
+    /// which start with the values of `startup_parameters`, the parameters
+    /// of a client's startup message.
     pub fn connect_with(
         db: &Arc<turso_core::Database>,
         opts: turso_core::ConnectOpts,
+        startup_parameters: &BTreeMap<String, String>,
     ) -> crate::Result<Self> {
-        let conn = db.connect_with_hooks(opts, Arc::new(PgSessionState::default()))?;
+        let state = PgSessionState::new(startup_parameters)?;
+        let conn = db.connect_with_hooks(opts, Arc::new(state))?;
         refuse_tables_in_no_schema(&conn)?;
         set_search_path(&conn, None, SettingScope::Session)?;
         Ok(Self {
@@ -249,6 +255,12 @@ impl PgConnection {
 
     pub fn query_runner<'a>(&'a self, sql: &'a [u8]) -> PgQueryRunner<'a> {
         PgQueryRunner::new(&self.inner, sql)
+    }
+
+    /// The parameter values that a server sends its client in ParameterStatus
+    /// messages when the session starts.
+    pub fn reported_parameters(&self) -> HashMap<String, String> {
+        crate::settings::reported_parameters(&self.inner.conn)
     }
 }
 
@@ -1978,11 +1990,17 @@ fn noop_statement(conn: &Arc<Connection>) -> Result<Statement> {
 fn handle_pg_set(pg_conn: &Arc<PgConnectionInner>, set_stmt: &PgSetStmt) -> Result<Statement> {
     let name = &set_stmt.name;
     let quote = |text: &str| format!("'{}'", text.replace('\'', "''"));
-    let value = match (find_parameter(name), &set_stmt.to) {
-        // A NULL value sets the default, as RESET does.
-        (Some(_), PgSetTo::Default) => "NULL".to_string(),
-        (Some(_), PgSetTo::Current) => format!("current_setting({})", quote(name)),
-        (Some(Parameter::BuiltIn(ConfigParameter::SearchPath)), PgSetTo::Values(values)) => quote(
+    let value = match (find_parameter(name)?, &set_stmt.to) {
+        // A NULL value resets the parameter, as RESET does.
+        (_, PgSetTo::Default) => "NULL".to_string(),
+        (_, PgSetTo::Current) => format!("current_setting({})", quote(name)),
+        (
+            Parameter::BuiltIn(BuiltInParameter {
+                kind: Kind::SearchPath,
+                ..
+            }),
+            PgSetTo::Values(values),
+        ) => quote(
             &values
                 .iter()
                 .map(|value| {
@@ -1994,7 +2012,7 @@ fn handle_pg_set(pg_conn: &Arc<PgConnectionInner>, set_stmt: &PgSetStmt) -> Resu
                 .ok_or_else(|| LimboError::ParseError("incorrect format".to_string()))?
                 .join(", "),
         ),
-        (Some(Parameter::Custom(_)), PgSetTo::Values(values)) => match values.as_slice() {
+        (Parameter::Custom(_), PgSetTo::Values(values)) => match values.as_slice() {
             [PgSetValue::Identifier(value)
             | PgSetValue::StringLiteral(value)
             | PgSetValue::Number(value)] => quote(value),
@@ -2006,7 +2024,7 @@ fn handle_pg_set(pg_conn: &Arc<PgConnectionInner>, set_stmt: &PgSetStmt) -> Resu
                 ))
             }
         },
-        (Some(Parameter::BuiltIn(parameter)), PgSetTo::Values(values)) => {
+        (Parameter::BuiltIn(parameter), PgSetTo::Values(values)) => {
             if values.len() != 1 && !parameter.accepts_list() {
                 return Err(sqlstate_error(
                     SQLSTATE_INVALID_PARAMETER_VALUE,
@@ -2026,16 +2044,6 @@ fn handle_pg_set(pg_conn: &Arc<PgConnectionInner>, set_stmt: &PgSetStmt) -> Resu
                 .collect::<Result<Vec<_>>>()?;
             quote(&values.join(", "))
         }
-        (None, to) => {
-            let command = match to {
-                PgSetTo::Default => "RESET",
-                PgSetTo::Values(_) | PgSetTo::Current => "SET",
-            };
-            return Err(sqlstate_error(
-                SQLSTATE_FEATURE_NOT_SUPPORTED,
-                format!("{command} {name} is not supported"),
-            ));
-        }
     };
     // Change the setting when the statement runs, not when it is prepared.
     // set_config returns text, so IS NULL prevents SET from returning rows.
@@ -2050,17 +2058,11 @@ fn handle_pg_show(pg_conn: &Arc<PgConnectionInner>, show_stmt: &PgShowStmt) -> R
     let name = &show_stmt.name;
     // PostgreSQL names the column after the parameter, not after the name
     // SHOW was given.
-    let column = match find_parameter(name) {
-        Some(Parameter::BuiltIn(parameter)) => parameter.name().to_owned(),
-        Some(Parameter::Custom(_)) => session_state(&pg_conn.conn)?
+    let column = match find_parameter(name)? {
+        Parameter::BuiltIn(parameter) => parameter.name().to_owned(),
+        Parameter::Custom(_) => session_state(&pg_conn.conn)
             .name_as_defined(name)
-            .unwrap_or_else(|| name.clone()),
-        None => {
-            return Err(sqlstate_error(
-                SQLSTATE_FEATURE_NOT_SUPPORTED,
-                format!("SHOW {name} is not supported"),
-            ))
-        }
+            .ok_or_else(|| unrecognized_parameter(name))?,
     };
     pg_conn.conn.prepare(format!(
         "SELECT current_setting('{}') AS {}",
@@ -2071,7 +2073,7 @@ fn handle_pg_show(pg_conn: &Arc<PgConnectionInner>, show_stmt: &PgShowStmt) -> R
 
 /// Sets every parameter to its default value, as RESET ALL does.
 fn reset_all_settings(conn: &Connection) -> Result<()> {
-    session_state(conn)?.mutate(conn, ConnectionSettings::reset_all);
+    session_state(conn).mutate(conn, ConnectionSettings::reset_all);
     set_search_path(conn, None, SettingScope::Session)?;
     Ok(())
 }
@@ -2102,9 +2104,9 @@ pub(crate) fn set_search_path(
 ) -> Result<String> {
     let mut path = parse_search_path(value.unwrap_or(DEFAULT_SEARCH_PATH))?;
     path.retain(|name| name != "$user" && !is_core_database_name(name));
-    session_state(conn)?.mutate(conn, |settings| {
+    session_state(conn).mutate(conn, |settings| {
         settings.set_search_path(Some(path.clone()), scope);
-        settings.set(SEARCH_PATH_SETTING, value.map(str::to_owned), scope);
+        settings.set(&SEARCH_PATH, value.map(str::to_owned), scope);
     });
     conn.set_search_path(Some(path));
     Ok(value.unwrap_or(DEFAULT_SEARCH_PATH).to_owned())
@@ -2147,14 +2149,13 @@ pub(crate) fn set_role(
     let role_id = role
         .as_ref()
         .map_or_else(|| conn.session_role(), |role| role.id);
-    session_state(conn)?.mutate(conn, |settings| settings.set_role(role, scope));
+    session_state(conn).mutate(conn, |settings| settings.set_role(role, scope));
     conn.set_current_role(role_id);
     Ok(value.unwrap_or("none").to_owned())
 }
 
 pub(crate) fn search_path_setting(conn: &Connection) -> Option<String> {
-    conn.context::<PgSessionState>()?
-        .setting(SEARCH_PATH_SETTING)
+    session_state(conn).setting(SEARCH_PATH.name())
 }
 
 pub(crate) fn set_custom_parameter(
@@ -2163,34 +2164,47 @@ pub(crate) fn set_custom_parameter(
     value: Option<&str>,
     scope: SettingScope,
 ) -> Result<String> {
-    if !is_valid_custom_parameter_name(name) {
-        return Err(sqlstate_error(
-            SQLSTATE_INVALID_NAME,
-            format!("invalid configuration parameter name \"{name}\""),
-        ));
-    }
-    session_state(conn)?.mutate(conn, |settings| {
-        settings.set(name, value.map(str::to_owned), scope)
+    let custom_name = CustomName::new(name)?;
+    session_state(conn).mutate(conn, |settings| {
+        settings.set_custom(custom_name, value.map(str::to_owned), scope)
     });
-    Ok(value.unwrap_or_default().to_owned())
+    let Some(value) = custom_parameter(conn, name) else {
+        unreachable!("setting the custom parameter {name} defines it");
+    };
+    Ok(value)
 }
 
 pub(crate) fn custom_parameter(conn: &Connection, name: &str) -> Option<String> {
-    let state = conn.context::<PgSessionState>()?;
-    let name = name.to_ascii_lowercase();
+    let state = session_state(conn);
     state
-        .has_setting(&name)
-        .then(|| state.setting(&name).unwrap_or_default())
+        .has_setting(name)
+        .then(|| state.setting(name).unwrap_or_default())
 }
 
-pub(crate) fn session_state(conn: &Connection) -> Result<&PgSessionState> {
-    conn.context::<PgSessionState>().ok_or_else(|| {
-        LimboError::InvalidArgument("PostgreSQL session state is not initialized".to_string())
-    })
+pub(crate) fn session_state(conn: &Connection) -> &PgSessionState {
+    conn.context::<PgSessionState>()
+        .expect("PostgresDialect::connection_context gives every connection a PgSessionState")
 }
 
-fn is_valid_custom_parameter_name(name: &str) -> bool {
-    name.contains('.') && name.split('.').all(is_simple_identifier)
+/// The name of a custom parameter that a session may define: two or more
+/// identifiers joined by dots, such as `app.user_id`.
+#[derive(Clone, Copy)]
+pub(crate) struct CustomName<'a>(&'a str);
+
+impl<'a> CustomName<'a> {
+    pub(crate) fn new(name: &'a str) -> Result<Self> {
+        if name.contains('.') && name.split('.').all(is_simple_identifier) {
+            return Ok(Self(name));
+        }
+        Err(sqlstate_error(
+            SQLSTATE_INVALID_NAME,
+            format!("invalid configuration parameter name \"{name}\""),
+        ))
+    }
+
+    pub(crate) fn as_str(self) -> &'a str {
+        self.0
+    }
 }
 
 fn is_simple_identifier(name: &str) -> bool {

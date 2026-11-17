@@ -62,9 +62,11 @@ Cancellation after commit does not undo the changes.
 
 ## PostgreSQL configuration parameters
 
-`SET`, `SET LOCAL`, `set_config`, `SHOW`, and `current_setting` use the same
-built-in parameter validation. `RESET`, `SET ... TO DEFAULT`, and a NULL value
-passed to `set_config` restore the parameter's default. `RESET ALL` and
+`SET`, `SET LOCAL`, `set_config`, `SHOW`, `current_setting`, and the
+parameters of a client's startup message use the same built-in parameter
+validation. `RESET`, `SET ... TO DEFAULT`, and a NULL value passed to
+`set_config` restore the value from the client's startup message if it
+sent one, otherwise the default. `RESET ALL` and
 `DISCARD ALL` also reset `application_name`, `search_path`, and custom parameters.
 Session changes inside a transaction roll back with the transaction; local
 changes last until its end. An implicit-transaction `set_config(..., true)`
@@ -72,16 +74,20 @@ returns the validated value without changing the next statement's settings.
 
 `application_name` stores text per connection (default: empty). `search_path`
 and dotted custom parameter names retain their existing transaction behavior.
-`current_setting(name, true)` returns NULL for unknown parameters.
+A name that is neither built in nor a dotted custom name is refused with
+SQLSTATE `0A000`, by `current_setting(name, true)` too. `current_setting(name,
+true)` returns NULL for a custom parameter that was never set.
 
-Other supported parameters describe fixed engine modes. Their effective value
-is returned consistently, including after reset:
+Other supported parameters describe fixed engine modes. Each accepts only the
+values that select that mode in PostgreSQL, and refuses every other value with
+SQLSTATE `0A000`:
 
-| Parameter | Effective value | Accepted alternatives |
+| Parameter | Default | Accepted alternatives |
 | --- | --- | --- |
-| `DateStyle` | `ISO, MDY` | `ISO`, `MDY`, either order of `ISO, MDY`; case insensitive |
+| `TimeZone` | `Etc/UTC` | `UTC`; case insensitive |
+| `DateStyle` | `ISO, MDY` | `ISO`, `MDY`, both in either order, and `US`, `NONEURO`, `NONEUROPEAN` for `MDY`; case insensitive |
 | `IntervalStyle` | `postgres` | Case insensitive |
-| `client_encoding` | `UTF8` | `UTF-8`, `UNICODE`; case insensitive |
+| `client_encoding` | `UTF8` | `UTF-8`, `UNICODE`; case insensitive, punctuation ignored |
 | `standard_conforming_strings` | `on` | PostgreSQL true spellings |
 | `extra_float_digits` | `1` | `2`, `3` (the same shortest-precise output mode) |
 | `statement_timeout`, `lock_timeout`, `idle_in_transaction_session_timeout`, `transaction_timeout` | `0` | None; timeouts are disabled |
@@ -97,3 +103,19 @@ remains unsupported. These settings do not add timeout enforcement, row-level
 security, function-body validation, synchronized scans, or additional diagnostic
 message levels. Previously accepted no-op requests for unsupported modes now
 raise an error rather than reporting that those modes took effect.
+
+A startup parameter that tursopg refuses closes the connection with a `FATAL`
+error. The startup parameters `options`, `search_path`, and
+`role` are refused with SQLSTATE `0A000`, as are replication connections,
+protocol extensions (`_pq_.*`), and one parameter given twice in different
+case, such as `TimeZone` and `timezone`.
+For example, a client started with `TimeZone=Europe/Helsinki` gets:
+
+```text
+FATAL:  parameter "TimeZone" does not support value "Europe/Helsinki"; supported: "UTC", "Etc/UTC"
+```
+
+At startup the server sends the session's values of `application_name`,
+`client_encoding`, `DateStyle`, `IntervalStyle`, `standard_conforming_strings`
+and `TimeZone` in ParameterStatus messages. It does not send ParameterStatus
+when a `SET` changes one of them.

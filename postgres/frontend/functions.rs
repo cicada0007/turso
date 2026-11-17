@@ -1,7 +1,9 @@
 use crate::acl::{acl_role_name, Privileges as AclPrivileges};
 use crate::catalog::role_name_by_oid;
 use crate::error::sqlstate_error;
-use crate::settings::{find_parameter, Parameter, SettingScope};
+use crate::settings::{
+    find_parameter, set_parameter, unrecognized_parameter, Parameter, SettingScope,
+};
 use chrono::{Datelike, NaiveDate, NaiveDateTime, NaiveTime, Timelike, Utc};
 use std::{fmt, sync::Arc};
 use turso_core::native_ext::{FunctionArity, ReturnType, ScalarCall, ScalarFunction, ScalarReturn};
@@ -480,7 +482,6 @@ fn exec_set_config(conn: &Connection, args: &[Register]) -> Result<String> {
             ));
         }
     };
-    let parameter = find_parameter(name).ok_or_else(|| unrecognized_parameter(name))?;
     let value = match args[1].get_value() {
         Value::Text(value) => Some(value.as_str()),
         Value::Null => None,
@@ -502,10 +503,7 @@ fn exec_set_config(conn: &Connection, args: &[Register]) -> Result<String> {
             }
         },
     };
-    match parameter {
-        Parameter::BuiltIn(parameter) => parameter.set(conn, value, scope),
-        Parameter::Custom(name) => crate::session::set_custom_parameter(conn, name, value, scope),
-    }
+    set_parameter(conn, name, value, scope)
 }
 
 fn exec_current_setting(conn: &Connection, args: &[Register]) -> Result<Option<String>> {
@@ -542,23 +540,15 @@ fn exec_current_setting(conn: &Connection, args: &[Register]) -> Result<Option<S
             }
         },
     };
-    let setting = match find_parameter(name) {
-        Some(Parameter::BuiltIn(parameter)) => Some(parameter.get(conn)),
-        Some(Parameter::Custom(name)) => crate::session::custom_parameter(conn, name),
-        None => None,
+    let setting = match find_parameter(name)? {
+        Parameter::BuiltIn(parameter) => Some(parameter.get(conn)),
+        Parameter::Custom(name) => crate::session::custom_parameter(conn, name),
     };
     match setting {
         Some(setting) => Ok(Some(setting)),
         None if missing_ok => Ok(None),
         None => Err(unrecognized_parameter(name)),
     }
-}
-
-fn unrecognized_parameter(name: &str) -> LimboError {
-    sqlstate_error(
-        SQLSTATE_UNDEFINED_OBJECT,
-        format!("unrecognized configuration parameter \"{name}\""),
-    )
 }
 
 /// Turns 64 random bits into a number in [0, 1). A double holds 53 bits of
@@ -1639,15 +1629,19 @@ pub(crate) fn validate_pg_input(input: &str, type_name: &str) -> Option<(String,
     }
 }
 
-/// The value of a PostgreSQL boolean literal such as 'yes', 'off' or 'tr',
-/// with the rules of PostgreSQL's boolean input: white space around the text
-/// and the case of the letters do not matter, and the start of true, false,
-/// yes or no is enough. For on and off, the first two letters are necessary.
-/// None when the text is not a boolean literal.
+/// The value of a PostgreSQL boolean literal such as 'yes', 'off' or ' tr',
+/// read as PostgreSQL's boolean input does: white space around the text does
+/// not matter. None when the text is not a boolean literal.
 pub(crate) fn parse_pg_bool(text: &str) -> Option<bool> {
-    let word = text
-        .trim_matches(|c: char| c.is_ascii_whitespace() || c == '\u{b}')
-        .to_ascii_lowercase();
+    parse_bool_setting(text.trim_matches(|c: char| c.is_ascii_whitespace() || c == '\u{b}'))
+}
+
+/// The value of a boolean setting such as 'yes', 'off' or 'tr', which unlike
+/// boolean input allows no white space around it. The case of the letters
+/// does not matter, and the start of true, false, yes or no is enough. For on
+/// and off, the first two letters are necessary.
+pub(crate) fn parse_bool_setting(text: &str) -> Option<bool> {
+    let word = text.to_ascii_lowercase();
     let starts = |full: &str, min_len: usize| word.len() >= min_len && full.starts_with(&word);
     if starts("true", 1) || starts("yes", 1) || starts("on", 2) || word == "1" {
         Some(true)
