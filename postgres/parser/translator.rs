@@ -7187,18 +7187,8 @@ fn pg_type_name_to_ast_type(
     type_name: &pg_query::protobuf::TypeName,
 ) -> Result<ast::Type, ParseError> {
     let pg_type = object_name(&type_name.names, is_default_schema, "type")?;
-    let array_dimensions = type_name.array_bounds.len() as u32;
-    check_array_dimensions(array_dimensions)?;
-    Ok(ast::Type {
-        name: cast_type_name(&pg_type).to_string(),
-        size: None,
-        array_dimensions,
-    })
-}
 
-/// The name a PostgreSQL type has in a CAST in the engine's AST.
-fn cast_type_name(pg_type: &str) -> &str {
-    match pg_type.to_uppercase().as_str() {
+    let name = match pg_type.to_uppercase().as_str() {
         "INTEGER" | "INT" | "INT4" | "SMALLINT" | "INT2" | "SERIAL" | "SMALLSERIAL" | "OID"
         | "REGCLASS" | "REGTYPE" => "INTEGER",
         // Casts like INTEGER; the name types the result as int8.
@@ -7218,8 +7208,16 @@ fn cast_type_name(pg_type: &str) -> &str {
             "TEXT"
         }
         "BYTEA" | "BLOB" => "BLOB",
-        _ => pg_type,
-    }
+        _ => &pg_type,
+    };
+
+    let array_dimensions = type_name.array_bounds.len() as u32;
+    check_array_dimensions(array_dimensions)?;
+    Ok(ast::Type {
+        name: name.to_string(),
+        size: None,
+        array_dimensions,
+    })
 }
 
 fn extract_type_name_from_typename(
