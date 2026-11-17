@@ -2023,6 +2023,35 @@ expect error {
     cannot compare type date with type timestamp
 }
 
+# The types are checked when the statement is prepared, even for a value that
+# is never computed.
+@requires strict "uses STRICT tables"
+test cmp-coalesce-of-date-and-timestamp-under-false-is-not-supported {
+    CREATE TABLE a(id INTEGER PRIMARY KEY, d date, ts timestamp) STRICT;
+    SELECT id FROM a WHERE 0 AND coalesce(d, ts) IS NOT NULL;
+}
+expect error {
+    cannot compare type date with type timestamp
+}
+
+@requires strict "uses STRICT tables"
+test cmp-iif-of-date-and-timestamp-under-false-is-not-supported {
+    CREATE TABLE a(id INTEGER PRIMARY KEY, d date, ts timestamp) STRICT;
+    SELECT id FROM a WHERE 0 AND iif(id = 1, d, ts) IS NOT NULL;
+}
+expect error {
+    cannot compare type date with type timestamp
+}
+
+@requires strict "uses STRICT tables"
+test cmp-case-of-date-and-timestamp-under-false-is-not-supported {
+    CREATE TABLE a(id INTEGER PRIMARY KEY, d date, ts timestamp) STRICT;
+    SELECT id FROM a WHERE 0 AND CASE WHEN id = 1 THEN d ELSE ts END IS NOT NULL;
+}
+expect error {
+    cannot compare type date with type timestamp
+}
+
 @requires strict "uses STRICT tables"
 test cmp-case-of-date-and-timestamp-is-not-supported {
     CREATE TABLE a(id INTEGER PRIMARY KEY, d date, ts timestamp) STRICT;
