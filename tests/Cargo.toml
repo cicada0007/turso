@@ -63,6 +63,7 @@ turso_macros.workspace = true
 crossbeam-epoch = "0.9.18"
 rustc-hash = "2.0"
 sorted-vec = "0.8.6"
+pack1 = { version = "1.0.0", features = ["bytemuck"] }
 
 [features]
 default = [

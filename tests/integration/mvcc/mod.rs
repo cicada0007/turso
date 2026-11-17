@@ -6,6 +6,7 @@ mod hermitage;
 mod logical_log;
 mod persistence;
 mod store;
+mod store_internals;
 mod test_db;
 mod transactions;
 
