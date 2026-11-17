@@ -227,8 +227,7 @@ pub fn translate_create_index(
         )
     })?;
 
-    // Block CREATE INDEX on STRUCT/UNION columns, on types that can't be sorted
-    // and on lossy types
+    // Block CREATE INDEX on types that can't be sorted and on lossy types
     for col in &columns {
         // A table column, including a virtual generated column. `col.expr` also
         // holds a virtual generated column's expression, so it cannot tell.
@@ -238,12 +237,6 @@ pub fn translate_create_index(
                     .schema()
                     .get_type_def(&column.ty_str, tbl.is_strict)
                 {
-                    if type_def.is_struct() || type_def.is_union() {
-                        bail_parse_error!(
-                            "cannot create index on STRUCT/UNION column '{}'",
-                            col.name
-                        );
-                    }
                     if column.type_ordering().is_none() && !type_def.is_sortable() {
                         bail_parse_error!(
                             "cannot create index on column '{}' of type '{}': type does not declare OPERATOR '<'",

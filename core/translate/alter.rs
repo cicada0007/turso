@@ -30,11 +30,11 @@ use crate::{
         ForeignKey, FromDefinitionFlags, Index, Schema, Table, EXPR_INDEX_SENTINEL,
     },
     translate::{
-        collate::key_collation,
+        collate::check_column_collation,
         emitter::{emit_check_constraints, gencol::compute_virtual_columns, Resolver},
         expr::{
-            emit_stored_column, expr_type::column_type, translate_expr_no_constant_opt, walk_expr,
-            walk_expr_mut, NoConstantOptReason, WalkControl,
+            emit_stored_column, translate_expr_no_constant_opt, walk_expr, walk_expr_mut,
+            NoConstantOptReason, WalkControl,
         },
         index::expression_type_ordering,
         plan::{
@@ -1368,8 +1368,7 @@ pub fn translate_alter_table(
             let default_type_mismatch = btree.is_strict && strict_default_type_mismatch(&column)?;
             if btree.is_strict {
                 column.resolve_custom_type(resolver.schema())?;
-                let ty = column_type(&column, true, resolver.schema());
-                key_collation(column.text_collation(), &ty, resolver.schema())?;
+                check_column_collation(&column, true, resolver.schema())?;
             }
 
             // If a column has no explicit DEFAULT but its custom type defines
@@ -2123,8 +2122,7 @@ pub fn translate_alter_table(
                 }
                 table.resolve_custom_types(resolver.schema())?;
                 let column = &table.columns()[column_index];
-                let ty = column_type(column, table.is_strict, resolver.schema());
-                key_collation(column.text_collation(), &ty, resolver.schema())?;
+                check_column_collation(column, table.is_strict, resolver.schema())?;
                 table.prepare_generated_columns()?;
                 let column_names: Vec<&str> = table
                     .columns()

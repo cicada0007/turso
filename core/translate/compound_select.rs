@@ -1,7 +1,9 @@
 use crate::alloc::{TursoIteratorExt, TursoTryWithCapacityExt, TursoVecExt};
 use crate::schema::{Index, IndexColumn, PseudoCursorType};
 use crate::sync::Arc;
-use crate::translate::collate::{compound_column_collation, CollationSeq};
+use crate::translate::collate::{
+    check_column_types, compound_column_collation, compound_column_values, CollationSeq,
+};
 use crate::translate::emitter::{
     select::{emit_materialized_build_inputs, emit_query},
     LimitCtx, Resolver, TranslateCtx,
@@ -151,7 +153,7 @@ pub fn emit_program_for_compound_select(
 
     let real_query_destination = right_most.query_destination.clone();
     let num_result_cols = right_most.result_columns.len();
-    let collations = compound_collations(left, right_most, resolver)?;
+    let collations = compound_collations(left, right_most, has_order_by, resolver)?;
 
     // When ORDER BY is present, redirect compound output to a collection index,
     // then sort and emit to the real destination afterwards.
@@ -828,10 +830,13 @@ fn create_collection_index(
 
 /// The collation of each compound result column. Every ephemeral index of the
 /// compound, including those of nested arms, uses it, as SQLite's
-/// multiSelectCollSeq does.
+/// multiSelectCollSeq does. A UNION ALL without ORDER BY compares no rows, so
+/// it has no collations, as SQLite builds them only for an ORDER BY or a merge
+/// (select.c multiSelectByMergeKeyInfo).
 fn compound_collations(
     left: &[(SelectPlan, CompoundOperator)],
     right_most: &SelectPlan,
+    has_order_by: bool,
     resolver: &Resolver,
 ) -> crate::Result<Vec<CollationSeq>> {
     let arms: Vec<&SelectPlan> = left
@@ -839,7 +844,21 @@ fn compound_collations(
         .map(|(select, _)| select)
         .chain([right_most])
         .collect();
-    (0..right_most.result_columns.len())
+    let columns = 0..right_most.result_columns.len();
+    for column in columns.clone() {
+        check_column_types(
+            compound_column_values(&arms, column, resolver),
+            resolver.schema(),
+        )?;
+    }
+    let compares_rows = has_order_by
+        || left
+            .iter()
+            .any(|(_, operator)| !matches!(operator, CompoundOperator::UnionAll));
+    if !compares_rows {
+        return Ok(Vec::new());
+    }
+    columns
         .map(|column| compound_column_collation(&arms, column, resolver))
         .collect()
 }

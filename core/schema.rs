@@ -119,7 +119,9 @@ use crate::dialect::identity_table_sql_marker;
 use crate::storage::btree::{BTreeCursor, CursorTrait};
 use crate::sync::Arc;
 use crate::sync::Mutex;
-use crate::translate::collate::{key_collation, CollationSeq, TextCollation};
+use crate::translate::collate::{
+    check_column_collation, key_collation, CollationSeq, TextCollation,
+};
 use crate::translate::expr::expr_type::{
     column_type, primitive_value_type, stored_value_type, value_type, BuiltinType, ExprType,
 };
@@ -702,7 +704,12 @@ impl TypeDef {
     /// with its own order sorts in it. Otherwise values sort by their stored
     /// value, which only keeps the order of the decoded values when the type
     /// says so with OPERATOR '<' (or has no DECODE, so the two are the same).
+    /// STRUCT and UNION values are blobs whose bytes don't sort as their
+    /// fields do, so they don't sort.
     pub fn is_sortable(&self) -> bool {
+        if self.is_struct() || self.is_union() {
+            return false;
+        }
         self.ordering().is_some()
             || self.decode().is_none()
             || self.operators().iter().any(|op| op.op == "<")
@@ -5862,8 +5869,7 @@ impl BTreeTable {
     /// COLLATE and the column's type takes none (see [key_collation]).
     pub(crate) fn check_collates_are_allowed(&self, schema: &Schema) -> Result<()> {
         for column in &self.columns {
-            let ty = column_type(column, self.is_strict, schema);
-            key_collation(column.text_collation(), &ty, schema)?;
+            check_column_collation(column, self.is_strict, schema)?;
         }
         for key in self.unique_sets.iter().flat_map(|set| &set.columns) {
             if let Some((_, column)) = self.get_column(&key.name) {

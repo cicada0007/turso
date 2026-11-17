@@ -667,3 +667,23 @@ expect {
 expect @tursopg error {
     array-valued subqueries in policies are not supported
 }
+
+# A policy's scalar subquery of a type without a custom type has no type, so it
+# compares as type any, which numeric doesn't compare with.
+test policy-comparing-numeric-with-an-integer-subquery {
+    CREATE ROLE rp_plain_reader;
+    CREATE TABLE rp_plain_docs (id INT PRIMARY KEY, n numeric(10,2));
+    INSERT INTO rp_plain_docs VALUES (1, 1), (2, 2);
+    ALTER TABLE rp_plain_docs ENABLE ROW LEVEL SECURITY;
+    GRANT SELECT ON rp_plain_docs TO rp_plain_reader;
+    CREATE POLICY first_n ON rp_plain_docs USING (n = (SELECT 1));
+    SET ROLE rp_plain_reader;
+    SELECT id FROM rp_plain_docs ORDER BY id;
+}
+expect {
+    1
+}
+@sqlstate 0A000
+expect @tursopg error {
+    cannot compare type numeric with type any
+}

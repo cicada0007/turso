@@ -299,19 +299,15 @@ expect {
 }
 
 @requires strict "uses STRICT tables"
-test cmp-numeric-in-subquery-either-side {
+test cmp-numeric-with-any-column-is-an-error {
+    -- A column of type ANY holds any kind of value, which numeric doesn't
+    -- compare with.
     CREATE TABLE s(id INTEGER PRIMARY KEY, x ANY) STRICT;
     CREATE TABLE b(m numeric(10,3)) STRICT;
-    INSERT INTO s VALUES (1, '1.5'), (2, 1.5), (3, 2);
-    INSERT INTO b VALUES (1.5);
-    SELECT 'eq', group_concat(s.id) FROM s, b WHERE s.x = b.m;
-    SELECT 'in', group_concat(id) FROM s WHERE x IN (SELECT m FROM b);
-    SELECT 'not-in', group_concat(id) FROM s WHERE x NOT IN (SELECT m FROM b);
+    SELECT id FROM s WHERE x IN (SELECT m FROM b);
 }
-expect {
-    eq|1,2
-    in|1,2
-    not-in|3
+expect error {
+    cannot compare type any with type numeric
 }
 
 @requires strict "uses STRICT tables"
@@ -332,27 +328,23 @@ test cmp-uuid-with-null-and-constants {
     CREATE TABLE t(id INTEGER PRIMARY KEY, u uuid) STRICT;
     INSERT INTO t VALUES (1, 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11'), (2, NULL);
     SELECT 'eq-null', count(*) FROM t WHERE u = NULL;
-    SELECT 'eq-null-text', count(*) FROM t WHERE u = CAST(NULL AS TEXT);
     SELECT 'is', count(*) FROM t WHERE u IS 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11';
     SELECT 'is-null', count(*) FROM t WHERE u IS NULL;
     SELECT 'in', count(*) FROM t WHERE u IN (NULL, 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11');
     SELECT 'case', id, CASE u WHEN NULL THEN 'null' WHEN 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11' THEN 'yes' ELSE 'no' END FROM t ORDER BY id;
     CREATE INDEX t_u ON t(u);
     SELECT 'eq-null', count(*) FROM t WHERE u = NULL;
-    SELECT 'eq-null-text', count(*) FROM t WHERE u = CAST(NULL AS TEXT);
     SELECT 'is', count(*) FROM t WHERE u IS 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11';
     SELECT 'is-null', count(*) FROM t WHERE u IS NULL;
 }
 expect {
     eq-null|0
-    eq-null-text|0
     is|1
     is-null|1
     in|1
     case|1|yes
     case|2|no
     eq-null|0
-    eq-null-text|0
     is|1
     is-null|1
 }
@@ -797,14 +789,14 @@ expect error {
 
 @requires strict "uses STRICT tables"
 test cmp-array-operator-window-range-offset-is-an-error {
-    -- Nothing declares the type of + on an array, so the value takes no RANGE
-    -- offsets.
+    -- Nothing declares the type of + on an array, so its values have no order
+    -- to sort by.
     CREATE TABLE t(a integer[]) STRICT;
     INSERT INTO t VALUES ('{1}');
     SELECT count(*) OVER (ORDER BY a + 1 RANGE BETWEEN 1 PRECEDING AND CURRENT ROW) FROM t;
 }
 expect error {
-    RANGE with offset PRECEDING/FOLLOWING is not supported for column type unknown
+    cannot compare values of type unknown
 }
 
 @requires strict "uses STRICT tables"
@@ -1474,6 +1466,25 @@ expect {
 }
 
 @requires strict "uses STRICT tables"
+test cmp-user-type-compares-its-decoded-values {
+    -- 1 and 11 are stored, and both read as 1, so DISTINCT, UNION, a join and
+    -- GROUP BY see equal values.
+    CREATE TYPE m10(value integer) BASE integer ENCODE value DECODE value % 10;
+    CREATE TABLE t(id INTEGER PRIMARY KEY, c m10) STRICT;
+    INSERT INTO t VALUES (1, 1), (2, 11);
+    SELECT count(*) FROM (SELECT DISTINCT c FROM t);
+    SELECT count(*) FROM (SELECT c FROM t WHERE id = 1 UNION SELECT c FROM t WHERE id = 2);
+    SELECT count(*) FROM t x JOIN t y ON x.c = y.c;
+    SELECT count(*) FROM t GROUP BY c;
+}
+expect {
+    1
+    1
+    4
+    2
+}
+
+@requires strict "uses STRICT tables"
 test cmp-timestamp-with-text-in-partial-index-where {
     -- The index's WHERE compares ts with a text. INSERT, UPDATE and DELETE
     -- convert the text alike, so they agree on which rows the index holds,
@@ -1739,7 +1750,7 @@ test cmp-min-with-text-and-two-custom-types-is-an-error {
     SELECT min(tm, d, '10:00') FROM t;
 }
 expect error {
-    cannot tell which type to read a string literal or parameter as
+    cannot compare type time with type date
 }
 
 @requires strict "uses STRICT tables"
@@ -1794,5 +1805,445 @@ test cmp-coalesce-with-text-and-two-custom-types-is-an-error {
     SELECT coalesce(tm, d, '10:00') FROM t;
 }
 expect error {
-    cannot tell which type to read a string literal or parameter as
+    cannot compare type time with type date
+}
+
+# One rule decides which types compare. A custom type compares with its own
+# type, a string literal, a parameter or NULL. It compares with another type
+# only when both are numbers, or when the custom type has no ENCODE and the
+# other type is its input type (varchar and text). PostgreSQL also refuses the
+# pairs in tests named "...-is-an-error". It runs the pairs in tests named
+# "...-is-not-supported", which Turso would compare as stored values.
+
+@requires strict "uses STRICT tables"
+test cmp-date-with-integer-is-an-error {
+    CREATE TABLE a(id INTEGER PRIMARY KEY, d date) STRICT;
+    INSERT INTO a VALUES (1, '2024-01-05');
+    SELECT id FROM a WHERE d = 5;
+}
+expect error {
+    cannot compare type date with type integer
+}
+
+@requires strict "uses STRICT tables"
+test cmp-date-with-integer-is-an-error-with-an-index {
+    CREATE TABLE a(id INTEGER PRIMARY KEY, d date) STRICT;
+    INSERT INTO a VALUES (1, '2024-01-05');
+    CREATE INDEX a_d ON a(d);
+    SELECT id FROM a WHERE d = 5;
+}
+expect error {
+    cannot compare type date with type integer
+}
+
+@requires strict "uses STRICT tables"
+test cmp-date-with-text-column-is-an-error {
+    CREATE TABLE a(id INTEGER PRIMARY KEY, d date, t text) STRICT;
+    INSERT INTO a VALUES (1, '2024-01-05', '2024-01-05');
+    SELECT id FROM a WHERE d = t;
+}
+expect error {
+    cannot compare type date with type text
+}
+
+@requires strict "uses STRICT tables"
+test cmp-date-with-timestamp-is-not-supported {
+    CREATE TABLE a(id INTEGER PRIMARY KEY, d date, ts timestamp) STRICT;
+    INSERT INTO a VALUES (1, '2024-01-05', '2024-01-05 00:00');
+    SELECT id FROM a WHERE d = ts;
+}
+expect error {
+    cannot compare type date with type timestamp
+}
+
+@requires strict "uses STRICT tables"
+test cmp-date-with-timestamp-in-a-join-is-not-supported {
+    CREATE TABLE a(id INTEGER PRIMARY KEY, d date) STRICT;
+    CREATE TABLE b(id INTEGER PRIMARY KEY, ts timestamp) STRICT;
+    INSERT INTO a VALUES (1, '2024-01-05');
+    INSERT INTO b VALUES (1, '2024-01-05 00:00');
+    SELECT a.id, b.id FROM a JOIN b ON a.d = b.ts;
+}
+expect error {
+    cannot compare type date with type timestamp
+}
+
+@requires strict "uses STRICT tables"
+test cmp-date-with-timestamp-in-an-index-join-is-not-supported {
+    CREATE TABLE a(id INTEGER PRIMARY KEY, d date) STRICT;
+    CREATE TABLE b(id INTEGER PRIMARY KEY, ts timestamp) STRICT;
+    CREATE INDEX b_ts ON b(ts);
+    INSERT INTO a VALUES (1, '2024-01-05');
+    INSERT INTO b VALUES (1, '2024-01-05 00:00');
+    SELECT a.id, b.id FROM a JOIN b ON a.d = b.ts;
+}
+expect error {
+    cannot compare type date with type timestamp
+}
+
+@requires strict "uses STRICT tables"
+test cmp-date-in-timestamp-subquery-is-not-supported {
+    CREATE TABLE a(id INTEGER PRIMARY KEY, d date) STRICT;
+    CREATE TABLE b(id INTEGER PRIMARY KEY, ts timestamp) STRICT;
+    INSERT INTO a VALUES (1, '2024-01-05');
+    INSERT INTO b VALUES (1, '2024-01-05 00:00');
+    SELECT id FROM a WHERE d IN (SELECT ts FROM b);
+}
+expect error {
+    cannot compare type date with type timestamp
+}
+
+@requires strict "uses STRICT tables"
+test cmp-date-with-timestamp-scalar-subquery-is-not-supported {
+    -- The subquery's type is known only after the subquery is planned, so the
+    -- comparison is checked again then.
+    CREATE TABLE a(id INTEGER PRIMARY KEY, d date) STRICT;
+    CREATE TABLE b(id INTEGER PRIMARY KEY, ts timestamp) STRICT;
+    INSERT INTO a VALUES (1, '2024-01-05');
+    INSERT INTO b VALUES (1, '2024-01-05 00:00');
+    SELECT id FROM a WHERE d = (SELECT ts FROM b);
+}
+expect error {
+    cannot compare type date with type timestamp
+}
+
+@requires strict "uses STRICT tables"
+test cmp-timestamp-scalar-subquery-with-date-is-not-supported {
+    CREATE TABLE a(id INTEGER PRIMARY KEY, d date) STRICT;
+    CREATE TABLE b(id INTEGER PRIMARY KEY, ts timestamp) STRICT;
+    INSERT INTO a VALUES (1, '2024-01-05');
+    INSERT INTO b VALUES (1, '2024-01-05 00:00');
+    SELECT id FROM a WHERE (SELECT ts FROM b) = d;
+}
+expect error {
+    cannot compare type timestamp with type date
+}
+
+# A trigger's NEW.k and OLD.k, and an UPSERT's excluded.rowid and
+# excluded.<rowid alias>, have no type when the column has no custom type. They
+# compare as type any, which a custom type doesn't compare with.
+
+@requires strict "uses STRICT tables"
+test cmp-numeric-with-trigger-new-of-integer-column-is-not-supported {
+    CREATE TABLE p(id INTEGER PRIMARY KEY, n numeric(10,2)) STRICT;
+    INSERT INTO p VALUES (1, 5);
+    CREATE TABLE src(id INTEGER, k INTEGER) STRICT;
+    CREATE TRIGGER tr AFTER INSERT ON src BEGIN UPDATE p SET n = 0 WHERE n = NEW.k; END;
+    INSERT INTO src VALUES (1, 5);
+}
+expect error {
+    cannot compare type numeric with type any
+}
+
+@requires strict "uses STRICT tables"
+test cmp-numeric-with-upsert-excluded-rowid-is-not-supported {
+    CREATE TABLE p(id INTEGER PRIMARY KEY, n numeric(10,2)) STRICT;
+    INSERT INTO p VALUES (1, 1);
+    INSERT INTO p VALUES (1, 7) ON CONFLICT (id) DO UPDATE SET n = 0 WHERE n = excluded.rowid;
+}
+expect error {
+    cannot compare type numeric with type any
+}
+
+@requires strict "uses STRICT tables"
+test cmp-numeric-with-upsert-excluded-rowid-alias-is-not-supported {
+    CREATE TABLE p(id INTEGER PRIMARY KEY, n numeric(10,2)) STRICT;
+    INSERT INTO p VALUES (1, 1);
+    INSERT INTO p VALUES (1, 7) ON CONFLICT (id) DO UPDATE SET n = 0 WHERE n = excluded.id;
+}
+expect error {
+    cannot compare type numeric with type any
+}
+
+# The type a trigger's NEW.k or an FK action's parent key carries can't be an
+# array type, so for an array column they compare as type any too.
+
+@requires strict "uses STRICT tables"
+test cmp-array-with-trigger-new-of-array-column-is-not-supported {
+    CREATE TABLE p(id INTEGER PRIMARY KEY, k integer[], hits INTEGER) STRICT;
+    INSERT INTO p VALUES (1, ARRAY[5], 0);
+    CREATE TABLE src(id INTEGER, k integer[]) STRICT;
+    CREATE TRIGGER tr AFTER INSERT ON src BEGIN UPDATE p SET hits = hits + 1 WHERE k = NEW.k; END;
+    INSERT INTO src VALUES (1, ARRAY[5]);
+}
+expect error {
+    cannot compare type integer\[\] with type any
+}
+
+@requires strict "uses STRICT tables"
+test cmp-array-in-fk-cascade-on-array-key-is-not-supported {
+    PRAGMA foreign_keys = ON;
+    CREATE TABLE p(id INTEGER PRIMARY KEY, k integer[] UNIQUE) STRICT;
+    CREATE TABLE c(id INTEGER PRIMARY KEY, k integer[] REFERENCES p(k) ON DELETE CASCADE) STRICT;
+    INSERT INTO p VALUES (1, ARRAY[5]);
+    INSERT INTO c VALUES (1, ARRAY[5]);
+    DELETE FROM p;
+}
+expect error {
+    cannot compare type any with type integer\[\]
+}
+
+@requires strict "uses STRICT tables"
+test cmp-date-in-timestamp-list-is-not-supported {
+    CREATE TABLE a(id INTEGER PRIMARY KEY, d date, ts timestamp) STRICT;
+    INSERT INTO a VALUES (1, '2024-01-05', '2024-01-05 00:00');
+    SELECT id FROM a WHERE d IN (ts);
+}
+expect error {
+    cannot compare type date with type timestamp
+}
+
+@requires strict "uses STRICT tables"
+test cmp-date-between-timestamps-is-not-supported {
+    CREATE TABLE a(id INTEGER PRIMARY KEY, d date, ts timestamp) STRICT;
+    INSERT INTO a VALUES (1, '2024-01-05', '2024-01-05 00:00');
+    SELECT id FROM a WHERE d BETWEEN ts AND ts;
+}
+expect error {
+    cannot compare type date with type timestamp
+}
+
+@requires strict "uses STRICT tables"
+test cmp-coalesce-of-date-and-timestamp-is-not-supported {
+    CREATE TABLE a(id INTEGER PRIMARY KEY, d date, ts timestamp) STRICT;
+    INSERT INTO a VALUES (1, '2024-01-05', '2024-01-05 00:00');
+    SELECT coalesce(d, ts) FROM a;
+}
+expect error {
+    cannot compare type date with type timestamp
+}
+
+@requires strict "uses STRICT tables"
+test cmp-case-of-date-and-timestamp-is-not-supported {
+    CREATE TABLE a(id INTEGER PRIMARY KEY, d date, ts timestamp) STRICT;
+    INSERT INTO a VALUES (1, '2024-01-05', '2024-01-05 00:00');
+    SELECT CASE WHEN id = 1 THEN d ELSE ts END FROM a;
+}
+expect error {
+    cannot compare type date with type timestamp
+}
+
+@requires strict "uses STRICT tables"
+test cmp-coalesce-of-date-and-integer-is-an-error {
+    CREATE TABLE a(id INTEGER PRIMARY KEY, d date) STRICT;
+    INSERT INTO a VALUES (1, '2024-01-05');
+    SELECT coalesce(d, 5) FROM a;
+}
+expect error {
+    cannot compare type date with type integer
+}
+
+@requires strict "uses STRICT tables"
+test cmp-nullif-of-date-and-integer-is-an-error {
+    CREATE TABLE a(id INTEGER PRIMARY KEY, d date) STRICT;
+    INSERT INTO a VALUES (1, '2024-01-05');
+    SELECT nullif(d, 5) FROM a;
+}
+expect error {
+    cannot compare type date with type integer
+}
+
+@requires strict "uses STRICT tables"
+test cmp-jsonb-with-jsonb-is-not-supported {
+    -- Turso would compare the stored bytes, so objects with their keys in
+    -- another order would differ (#11911).
+    CREATE TABLE c(id INTEGER PRIMARY KEY, j jsonb) STRICT;
+    INSERT INTO c VALUES (1, '{"a":1,"b":2}'), (2, '{"b":2,"a":1}');
+    SELECT x.id, y.id FROM c x JOIN c y ON x.j = y.j;
+}
+expect error {
+    cannot compare values of type jsonb
+}
+
+@requires strict "uses STRICT tables"
+test cmp-group-by-jsonb-is-not-supported {
+    CREATE TABLE c(id INTEGER PRIMARY KEY, j jsonb) STRICT;
+    INSERT INTO c VALUES (1, '{"a":1,"b":2}'), (2, '{"b":2,"a":1}');
+    SELECT count(*) FROM c GROUP BY j;
+}
+expect error {
+    cannot compare values of type jsonb
+}
+
+@requires strict "uses STRICT tables"
+test cmp-order-by-value-of-unknown-type-is-not-supported {
+    -- Nothing declares the type of + on an array, so its values have no order
+    -- to sort by.
+    CREATE TABLE c(id INTEGER PRIMARY KEY, ia integer[]) STRICT;
+    INSERT INTO c VALUES (1, ARRAY[2]), (2, ARRAY[1]);
+    SELECT id FROM c ORDER BY ia + 1;
+}
+expect error {
+    cannot compare values of type unknown
+}
+
+@requires strict "uses STRICT tables"
+test cmp-distinct-jsonb-is-not-supported {
+    CREATE TABLE c(id INTEGER PRIMARY KEY, j jsonb) STRICT;
+    INSERT INTO c VALUES (1, '{"a":1,"b":2}'), (2, '{"b":2,"a":1}');
+    SELECT DISTINCT j FROM c;
+}
+expect error {
+    cannot compare values of type jsonb
+}
+
+@requires strict "uses STRICT tables"
+test cmp-order-by-jsonb-is-not-supported {
+    CREATE TABLE c(id INTEGER PRIMARY KEY, j jsonb) STRICT;
+    INSERT INTO c VALUES (1, '{"a":1,"b":2}'), (2, '{"b":2,"a":1}');
+    SELECT id FROM c ORDER BY j;
+}
+expect error {
+    cannot compare values of type jsonb
+}
+
+@requires strict "uses STRICT tables"
+test cmp-unique-jsonb-is-not-supported {
+    CREATE TABLE c(id INTEGER PRIMARY KEY, j jsonb UNIQUE) STRICT;
+}
+expect error {
+    cannot compare values of type jsonb
+}
+
+@requires strict "uses STRICT tables"
+test cmp-index-on-inet-is-not-supported {
+    CREATE TABLE c(id INTEGER PRIMARY KEY, ip inet) STRICT;
+    CREATE INDEX c_ip ON c(ip);
+}
+expect error {
+    cannot compare values of type inet
+}
+
+@requires strict "uses STRICT tables"
+test cmp-union-of-time-and-string-literal-is-not-supported {
+    -- The literal would sort as the text '10:00' among the stored times.
+    CREATE TABLE a(id INTEGER PRIMARY KEY, tm time) STRICT;
+    INSERT INTO a VALUES (1, '09:30'), (2, '23:59:59');
+    SELECT tm FROM a UNION SELECT '10:00' ORDER BY 1;
+}
+expect error {
+    cannot compare type time with type text
+}
+
+@requires strict "uses STRICT tables"
+test cmp-insert-values-of-string-literal-and-time {
+    -- Each value is stored as a time, so the string literal needs no type of its own.
+    CREATE TABLE a(id INTEGER PRIMARY KEY, tm time) STRICT;
+    INSERT INTO a VALUES (1, '9:45'), (2, CAST('10:00' AS time));
+    SELECT tm FROM a ORDER BY id;
+}
+expect {
+    09:45:00
+    10:00:00
+}
+
+test cmp-values-of-string-literal-and-time-is-not-supported {
+    -- The literal would sort as the text '9:00' among the times.
+    SELECT column1 FROM (VALUES (CAST('10:00' AS time)), ('9:00')) ORDER BY 1;
+}
+expect error {
+    cannot compare type time with type text
+}
+
+test cmp-cte-values-of-string-literal-and-time-is-not-supported {
+    WITH v(x) AS (VALUES (CAST('10:00' AS time)), ('9:00')) SELECT x FROM v ORDER BY x;
+}
+expect error {
+    cannot compare type time with type text
+}
+
+test cmp-recursive-cte-of-time-and-string-literal-is-not-supported {
+    -- The recursive SELECT's literal would sort as the text '9:00' among the times.
+    WITH RECURSIVE r(x, n) AS (
+        SELECT CAST('10:00' AS time), 0
+        UNION ALL
+        SELECT '9:00', n + 1 FROM r WHERE n < 1
+    )
+    SELECT x FROM r ORDER BY x;
+}
+expect error {
+    cannot compare type time with type text
+}
+
+test cmp-recursive-cte-of-times {
+    WITH RECURSIVE r(x, n) AS (
+        SELECT CAST('10:00' AS time), 0
+        UNION ALL
+        SELECT CAST('09:00' AS time), n + 1 FROM r WHERE n < 1
+    )
+    SELECT x FROM r ORDER BY x;
+}
+expect {
+    09:00:00
+    10:00:00
+}
+
+# Arrays compare element by element, so an array of a type whose values don't
+# compare doesn't compare either.
+@requires strict "uses STRICT tables"
+test cmp-order-by-jsonb-array-is-not-supported {
+    CREATE TABLE c(id INTEGER PRIMARY KEY, j jsonb[]) STRICT;
+    INSERT INTO c VALUES (1, ARRAY['{"a":1,"b":2}']), (2, ARRAY['{"b":2,"a":1}']);
+    SELECT id FROM c ORDER BY j;
+}
+expect error {
+    cannot compare values of type jsonb\[\]
+}
+
+@requires strict "uses STRICT tables"
+test cmp-distinct-json-array-is-not-supported {
+    CREATE TABLE c(id INTEGER PRIMARY KEY, j json[]) STRICT;
+    INSERT INTO c VALUES (1, ARRAY['{"a":1}']), (2, ARRAY['{"a": 1}']);
+    SELECT DISTINCT j FROM c;
+}
+expect error {
+    cannot compare values of type json\[\]
+}
+
+@requires strict "uses STRICT tables"
+test cmp-index-on-inet-array-is-not-supported {
+    CREATE TABLE c(id INTEGER PRIMARY KEY, ip inet[]) STRICT;
+    CREATE INDEX c_ip ON c(ip);
+}
+expect error {
+    cannot compare values of type inet\[\]
+}
+
+@requires strict "uses STRICT tables"
+test cmp-union-of-time-and-integer-is-an-error {
+    CREATE TABLE a(id INTEGER PRIMARY KEY, tm time) STRICT;
+    SELECT tm FROM a UNION SELECT 5;
+}
+expect error {
+    cannot compare type time with type integer
+}
+
+@requires strict "uses STRICT tables"
+test cmp-pairs-that-still-compare {
+    CREATE TABLE a(id INTEGER PRIMARY KEY, d date, tm time, v varchar(10), t text, i bigint, n numeric(10,2), j jsonb) STRICT;
+    INSERT INTO a VALUES (1, '2024-01-05', '09:30', 'x', 'x', 5, 5, '{"a":1}'), (2, '2024-01-06', '23:59:59', 'y', 'z', 6, 6.5, NULL);
+    SELECT 'literal', id FROM a WHERE d = '2024-01-05';
+    SELECT 'null', count(*) FROM a WHERE d = NULL;
+    SELECT 'same-type', count(*) FROM a x JOIN a y ON x.d = y.d;
+    SELECT 'numbers', id FROM a WHERE n = i;
+    SELECT 'varchar-text', id FROM a WHERE v = t;
+    SELECT 'bigint-integer', id FROM a WHERE i = 6;
+    SELECT 'coalesce-literal', coalesce(d, '2024-01-01') FROM a WHERE id = 1;
+    SELECT 'jsonb-read', j FROM a WHERE id = 1;
+    SELECT 'jsonb-is-null', id FROM a WHERE j IS NULL;
+    SELECT 'union-all', tm FROM a UNION ALL SELECT 'union-all', tm FROM a WHERE id = 1 ORDER BY 2;
+}
+expect {
+    literal|1
+    null|0
+    same-type|2
+    numbers|1
+    varchar-text|1
+    bigint-integer|2
+    coalesce-literal|2024-01-05
+    jsonb-read|{"a":1}
+    jsonb-is-null|2
+    union-all|09:30:00
+    union-all|09:30:00
+    union-all|23:59:59
 }

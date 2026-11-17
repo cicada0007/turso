@@ -245,14 +245,23 @@ pub(crate) fn untyped_values_type<'e>(
     if schema.type_registry.is_empty() {
         return Ok(None);
     }
+    let env = TypeEnv::new(referenced_tables, resolver);
+    // The values must be of types that compare, as the expression has one
+    // type: coalesce(d, ts) for a date d and a timestamp ts is refused.
     let mut has_untyped_value = false;
+    let mut types: Vec<ExprType> = Vec::new();
     for value in values.clone() {
-        has_untyped_value |= is_untyped_operand(value)?;
+        let is_untyped = is_untyped_operand(value)?;
+        has_untyped_value |= is_untyped;
+        types.push(match is_untyped {
+            true => ExprType::Untyped,
+            false => type_of(value, &env),
+        });
     }
+    check_types_compare(&types, schema)?;
     if !has_untyped_value {
         return Ok(None);
     }
-    let env = TypeEnv::new(referenced_tables, resolver);
     let common = common_type(values.clone(), &env);
     match common {
         ExprType::Custom { .. } => untyped_operands_read_as(schema, common),
@@ -446,7 +455,7 @@ fn untyped_operands_read_as(
 /// foreign key's parent key, carries the column's type or collation and holds
 /// the column's value. Parentheses don't change this: `('10:00')` is a string
 /// literal too.
-fn is_untyped_operand(expr: &ast::Expr) -> Result<bool> {
+pub(crate) fn is_untyped_operand(expr: &ast::Expr) -> Result<bool> {
     Ok(match unwrap_parens(expr)? {
         ast::Expr::Literal(ast::Literal::String(_)) => true,
         ast::Expr::Variable(variable) => {

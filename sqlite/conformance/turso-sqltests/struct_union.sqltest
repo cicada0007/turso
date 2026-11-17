@@ -7,14 +7,45 @@
 # STRUCT basics
 # ============================================================================
 
-test struct-check-compares-with-struct-pack {
+# STRUCT and UNION values are stored as blobs whose bytes don't sort as their
+# fields do, so they don't compare at all. Their fields do.
+test struct-check-compare-with-struct-pack-is-refused {
     CREATE TYPE point AS STRUCT(x INT, y INT);
     CREATE TABLE t(id INT, pos point CHECK (pos <> struct_pack(0, 0))) STRICT;
     INSERT INTO t VALUES (1, struct_pack(10, 20));
-    SELECT id FROM t;
 }
-expect {
-    1
+expect error {
+    cannot compare type point with type any
+}
+
+test struct-order-by-is-refused {
+    CREATE TYPE point AS STRUCT(x INT, y INT);
+    CREATE TABLE t(id INT, pos point) STRICT;
+    INSERT INTO t VALUES (1, struct_pack(10, 20)), (2, struct_pack(9, 300));
+    SELECT id FROM t ORDER BY pos;
+}
+expect error {
+    cannot compare values of type point
+}
+
+test struct-columns-compare-is-refused {
+    CREATE TYPE point AS STRUCT(x INT, y INT);
+    CREATE TABLE t(id INT, pos point) STRICT;
+    INSERT INTO t VALUES (1, struct_pack(10, 20)), (2, struct_pack(9, 300));
+    SELECT a.id, b.id FROM t a, t b WHERE a.pos < b.pos;
+}
+expect error {
+    cannot compare values of type point
+}
+
+test union-group-by-is-refused {
+    CREATE TYPE number AS UNION(i INT, f REAL);
+    CREATE TABLE t(id INT, val number) STRICT;
+    INSERT INTO t VALUES (1, union_value('i', 1));
+    SELECT count(*) FROM t GROUP BY val;
+}
+expect error {
+    cannot compare values of type number
 }
 
 test struct-basic-insert-select {
@@ -205,7 +236,7 @@ test struct-reject-index {
     CREATE INDEX idx ON t(pos);
 }
 expect error {
-    cannot create index on STRUCT/UNION column 'pos'
+    cannot compare values of type point
 }
 
 test union-reject-index {
@@ -214,7 +245,7 @@ test union-reject-index {
     CREATE INDEX idx ON t(val);
 }
 expect error {
-    cannot create index on STRUCT/UNION column 'val'
+    cannot compare values of type number
 }
 
 test non-struct-index-still-works {

@@ -5,8 +5,8 @@ use tracing::{instrument, Level};
 use turso_parser::ast::{self, Expr, ResolveType, SubqueryType, TableInternalId, UnaryOperator};
 
 use super::collate::{
-    check_collate_operand, check_expr_collation, comparison_collation, first_collation,
-    in_list_collation, CollationSeq,
+    check_collate_operand, check_expr_collation, check_types_compare, comparison_collation,
+    first_collation, in_list_collation, CollationSeq,
 };
 use super::emitter::Resolver;
 use super::expr_context::{ExprContext, ExprProperties};
@@ -112,7 +112,7 @@ pub(crate) use custom_types::{
     emit_encode_for_comparison, emit_store_value, emit_trigger_decode_registers, emit_type_expr,
     emit_untyped_operand_store, emit_user_facing_column_value,
 };
-pub(crate) use custom_types::{runs_custom_type_function, takes_input_of_type};
+pub(crate) use custom_types::{is_untyped_operand, runs_custom_type_function, takes_input_of_type};
 pub use emission::{
     emit_function_call, emit_literal, process_returning_clause, ReturningBufferCtx,
 };

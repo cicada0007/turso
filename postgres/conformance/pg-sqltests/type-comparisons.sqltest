@@ -1,0 +1,212 @@
+# Which types compare with each other. tursopg refuses with 0A000 every pair
+# of types it can't compare as PostgreSQL does, whether or not PostgreSQL runs
+# the comparison.
+
+@database :memory:
+
+test compare-date-with-integer {
+    CREATE TABLE a (id int, d date);
+    INSERT INTO a VALUES (1, '2024-01-05');
+    SELECT id FROM a WHERE d = 5;
+}
+@sqlstate 42883
+expect error {}
+@sqlstate 0A000
+expect @tursopg error {
+    cannot compare type date with type integer
+}
+
+test compare-date-with-integer-with-an-index {
+    CREATE TABLE a (id int, d date);
+    CREATE INDEX a_d ON a (d);
+    INSERT INTO a VALUES (1, '2024-01-05');
+    SELECT id FROM a WHERE d = 5;
+}
+@sqlstate 42883
+expect error {}
+@sqlstate 0A000
+expect @tursopg error {
+    cannot compare type date with type integer
+}
+
+test compare-date-with-text {
+    CREATE TABLE a (id int, d date, t text);
+    INSERT INTO a VALUES (1, '2024-01-05', '2024-01-05');
+    SELECT id FROM a WHERE d = t;
+}
+@sqlstate 42883
+expect error {}
+@sqlstate 0A000
+expect @tursopg error {
+    cannot compare type date with type text
+}
+
+test compare-date-with-timestamp {
+    CREATE TABLE a (id int, d date, ts timestamp);
+    INSERT INTO a VALUES (1, '2024-01-05', '2024-01-05 00:00');
+    SELECT id FROM a WHERE d = ts;
+}
+expect {
+    1
+}
+@sqlstate 0A000
+expect @tursopg error {
+    cannot compare type date with type timestamp
+}
+
+test compare-date-with-timestamp-in-a-join {
+    CREATE TABLE a (id int, d date);
+    CREATE TABLE b (id int, ts timestamp);
+    INSERT INTO a VALUES (1, '2024-01-05');
+    INSERT INTO b VALUES (1, '2024-01-05 00:00');
+    SELECT a.id, b.id FROM a JOIN b ON a.d = b.ts;
+}
+expect {
+    1|1
+}
+@sqlstate 0A000
+expect @tursopg error {
+    cannot compare type date with type timestamp
+}
+
+test compare-date-in-timestamp-subquery {
+    CREATE TABLE a (id int, d date);
+    CREATE TABLE b (id int, ts timestamp);
+    INSERT INTO a VALUES (1, '2024-01-05');
+    INSERT INTO b VALUES (1, '2024-01-05 00:00');
+    SELECT id FROM a WHERE d IN (SELECT ts FROM b);
+}
+expect {
+    1
+}
+@sqlstate 0A000
+expect @tursopg error {
+    cannot compare type date with type timestamp
+}
+
+test coalesce-of-date-and-timestamp {
+    CREATE TABLE a (id int, d date, ts timestamp);
+    INSERT INTO a VALUES (1, '2024-01-05', '2024-01-06 10:00');
+    SELECT coalesce(d, ts) FROM a;
+}
+expect {
+    2024-01-05 00:00:00
+}
+@sqlstate 0A000
+expect @tursopg error {
+    cannot compare type date with type timestamp
+}
+
+test coalesce-of-date-and-integer {
+    CREATE TABLE a (id int, d date);
+    INSERT INTO a VALUES (1, '2024-01-05');
+    SELECT coalesce(d, 5) FROM a;
+}
+@sqlstate 42804
+expect error {}
+@sqlstate 0A000
+expect @tursopg error {
+    cannot compare type date with type integer
+}
+
+test nullif-of-date-and-integer {
+    CREATE TABLE a (id int, d date);
+    INSERT INTO a VALUES (1, '2024-01-05');
+    SELECT nullif(d, 5) FROM a;
+}
+@sqlstate 42883
+expect error {}
+@sqlstate 0A000
+expect @tursopg error {
+    cannot compare type date with type integer
+}
+
+test compare-jsonb-with-jsonb {
+    CREATE TABLE c (id int, j jsonb);
+    INSERT INTO c VALUES (1, '{"a":1,"b":2}'), (2, '{"b":2,"a":1}');
+    SELECT x.id, y.id FROM c x JOIN c y ON x.j = y.j WHERE x.id < y.id;
+}
+expect {
+    1|2
+}
+@sqlstate 0A000
+expect @tursopg error {
+    cannot compare values of type jsonb
+}
+
+test group-by-jsonb {
+    CREATE TABLE c (id int, j jsonb);
+    INSERT INTO c VALUES (1, '{"a":1,"b":2}'), (2, '{"b":2,"a":1}');
+    SELECT count(*) FROM c GROUP BY j;
+}
+expect {
+    2
+}
+@sqlstate 0A000
+expect @tursopg error {
+    cannot compare values of type jsonb
+}
+
+test union-of-time-and-string-literal {
+    CREATE TABLE a (id int, tm time);
+    INSERT INTO a VALUES (1, '09:30'), (2, '23:59:59');
+    SELECT tm FROM a UNION SELECT '10:00' ORDER BY 1;
+}
+expect {
+    09:30:00
+    10:00:00
+    23:59:59
+}
+@sqlstate 0A000
+expect @tursopg error {
+    cannot compare type time with type text
+}
+
+test values-of-string-literal-and-time {
+    SELECT x FROM (VALUES ('9:45'), ('10:00'::time)) v(x) ORDER BY 1;
+}
+expect {
+    09:45:00
+    10:00:00
+}
+@sqlstate 0A000
+expect @tursopg error {
+    cannot compare type text with type time
+}
+
+test union-of-time-and-integer {
+    CREATE TABLE a (id int, tm time);
+    SELECT tm FROM a UNION SELECT 5;
+}
+@sqlstate 42804
+expect error {}
+@sqlstate 0A000
+expect @tursopg error {
+    cannot compare type time with type integer
+}
+
+# tursopg casts to uuid as to text (#11475), so the cast keeps the uppercase
+# and never equals the stored uuid. The text is refused instead.
+test compare-uuid-with-a-cast-to-uuid {
+    CREATE TABLE u (id int, owner uuid);
+    INSERT INTO u VALUES (1, 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11');
+    SELECT id FROM u WHERE owner = 'A0EEBC99-9C0B-4EF8-BB6D-6BB9BD380A11'::uuid;
+}
+expect {
+    1
+}
+@sqlstate 0A000
+expect @tursopg error {
+    cannot compare type uuid with type text
+}
+
+test comparisons-that-still-run {
+    CREATE TABLE a (id int, d date, i bigint, n numeric(10,2));
+    INSERT INTO a VALUES (1, '2024-01-05', 5, 5), (2, '2024-01-06', 6, 6.5);
+    SELECT 'literal', id FROM a WHERE d = '2024-01-05';
+    SELECT 'numbers', id FROM a WHERE n = i;
+}
+expect {
+    literal|1
+    numbers|1
+}
