@@ -285,7 +285,7 @@ pub struct OperatorSignature {
     pub op: &'static str,
     /// One operand for a prefix operator, two for a binary one.
     pub args: std::vec::Vec<OperatorArg>,
-    pub func: Option<String>,
+    pub func: Option<ScalarFunc>,
     /// The type `func` returns. `None` when SQLite's operator runs.
     pub result: Option<&'static str>,
 }
@@ -365,49 +365,49 @@ fn builtin_value_type(type_name: &str) -> crate::Result<BuiltinType> {
 /// `-date` and `numeric & 1` are errors, as in PostgreSQL.
 fn builtin_signatures(type_name: &str) -> std::vec::Vec<OperatorSignature> {
     use OperatorArg::{EncodableLiteral, Exact, Integer, Real, Value};
-    let call = |op, args: &[OperatorArg], func: &str, result| OperatorSignature {
+    let call = |op, args: &[OperatorArg], func: ScalarFunc, result| OperatorSignature {
         op,
         args: args.to_vec(),
-        func: Some(func.to_string()),
+        func: Some(func),
         result,
     };
     match type_name {
         "numeric" => {
             let mut signatures = std::vec::Vec::new();
             for (op, func) in [
-                ("+", "numeric_add"),
-                ("-", "numeric_sub"),
-                ("*", "numeric_mul"),
-                ("/", "numeric_div"),
-                ("%", "numeric_mod"),
+                ("+", ScalarFunc::NumericAdd),
+                ("-", ScalarFunc::NumericSub),
+                ("*", ScalarFunc::NumericMul),
+                ("/", ScalarFunc::NumericDiv),
+                ("%", ScalarFunc::NumericMod),
             ] {
                 for args in [[Value, Value], [Value, Exact], [Exact, Value]] {
-                    signatures.push(call(op, &args, func, Some("numeric")));
+                    signatures.push(call(op, &args, func.clone(), Some("numeric")));
                 }
                 if op != "%" {
                     signatures.extend(sqlite_operator(op, Real));
                 }
             }
-            signatures.push(call("-", &[Value], "numeric_neg", Some("numeric")));
+            signatures.push(call("-", &[Value], ScalarFunc::NumericNeg, Some("numeric")));
             signatures
         }
         "date" => std::vec![
-            call("+", &[Value, Integer], "date_plus", Some("date")),
-            call("+", &[Integer, Value], "date_plus", Some("date")),
-            call("-", &[Value, Value], "date_diff", Some("integer")),
+            call("+", &[Value, Integer], ScalarFunc::DatePlus, Some("date")),
+            call("+", &[Integer, Value], ScalarFunc::DatePlus, Some("date")),
+            call("-", &[Value, Value], ScalarFunc::DateDiff, Some("integer")),
             call(
                 "-",
                 &[Value, EncodableLiteral],
-                "date_diff",
+                ScalarFunc::DateDiff,
                 Some("integer")
             ),
             call(
                 "-",
                 &[EncodableLiteral, Value],
-                "date_diff",
+                ScalarFunc::DateDiff,
                 Some("integer")
             ),
-            call("-", &[Value, Integer], "date_minus", Some("date")),
+            call("-", &[Value, Integer], ScalarFunc::DateMinus, Some("date")),
         ],
         "smallint" | "bigint" => {
             let binary = BINARY_OPERATORS

@@ -107,7 +107,7 @@ pub(super) fn find_operator_call(
             _ => unreachable!("an operator has one or two operands"),
         }
     };
-    call_for(signature, ty, env)
+    call_for(signature, ty)
 }
 
 /// The symbol and operands of `expr` when it is an operator that custom types
@@ -287,20 +287,11 @@ fn has_sqlite_operator(type_def: &TypeDef, signature: &OperatorSignature) -> boo
 }
 
 /// The call that `signature` makes, or `None` for SQLite's operator.
-fn call_for(
-    signature: &OperatorSignature,
-    ty: &ColumnCustomType,
-    env: &TypeEnv,
-) -> Result<Option<OperatorCall>> {
+fn call_for(signature: &OperatorSignature, ty: &ColumnCustomType) -> Result<Option<OperatorCall>> {
     let Some(func) = &signature.func else {
         return Ok(None);
     };
-    let Some(function) = env.resolve_function(func, signature.args.len())? else {
-        return Err(LimboError::InternalError(format!(
-            "function {func} for operator {} on type {} does not exist",
-            signature.op, ty.type_def.name
-        )));
-    };
+    let function = Func::Scalar(func.clone());
     let encode = signature
         .args
         .iter()
