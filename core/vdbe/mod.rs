@@ -4059,21 +4059,40 @@ impl Program {
         let Some(pending) = state.sequence_inner_tx_pending.take() else {
             return;
         };
-        state.sequence_inner_commit = None;
         let mv_store = self
             .connection
             .mv_store_for_db(pending.db)
             .expect("a sequence's inner transaction runs on an MVCC database");
-        if mv_store.is_tx_rollbackable(pending.inner_tx_id) {
-            mv_store.rollback_tx(
-                pending.inner_tx_id,
-                pager.clone(),
-                &self.connection,
-                pending.db,
-            );
+        match state.sequence_inner_commit.take() {
+            // A commit that was under way ends the inner transaction when it
+            // is dropped: it rolls it back, finishes a commit whose log
+            // record is written, or leaves it to the group commit that took
+            // it. Rolling it back here as well would undo the last two.
+            Some(commit) => drop(commit),
+            None => {
+                turso_assert!(
+                    mv_store.is_tx_rollbackable(pending.inner_tx_id),
+                    "nextval's transaction ended before its commit began",
+                    { "tx_id": pending.inner_tx_id }
+                );
+                mv_store.rollback_tx(
+                    pending.inner_tx_id,
+                    pager.clone(),
+                    &self.connection,
+                    pending.db,
+                );
+            }
         }
+        let (outer_tx_id, outer_mode) = pending
+            .saved_outer
+            .expect("nextval runs inside the statement's own transaction");
+        turso_assert!(
+            mv_store.is_tx_rollbackable(outer_tx_id),
+            "the statement's own transaction ended while nextval's was open",
+            { "tx_id": outer_tx_id }
+        );
         self.connection
-            .set_mv_tx_for_db(pending.db, pending.saved_outer);
+            .set_mv_tx_for_db(pending.db, Some((outer_tx_id, outer_mode)));
     }
 
     pub fn is_trigger_subprogram(&self) -> bool {
