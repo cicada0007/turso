@@ -433,7 +433,7 @@ impl Statement {
 
     fn arm_query_timeout_if_needed(&mut self) {
         if !matches!(self.state.execution_state, ProgramExecutionState::Init)
-            || self.state.query_deadline.is_some()
+            || self.state.scope.query_deadline.is_some()
         {
             return;
         }
@@ -447,7 +447,7 @@ impl Statement {
         let Some(timeout) = timeout else {
             return;
         };
-        self.state.query_deadline = Some(self.pager.io.current_time_monotonic() + timeout);
+        self.state.scope.query_deadline = Some(self.pager.io.current_time_monotonic() + timeout);
     }
 
     fn release_active_root_if_counted(&mut self, statement_failed: bool) {
@@ -651,7 +651,7 @@ impl Statement {
                 .with_metrics(|metrics| connection.metrics.write().record_statement(metrics));
             self.busy = false;
             self.busy_handler_state = None; // Reset busy state on completion
-            self.state.query_deadline = None;
+            self.state.scope.query_deadline = None;
 
             // After ANALYZE completes, refresh in-memory stats so planners can use them.
             if self.program.refreshes_analyze_stats {
@@ -784,22 +784,10 @@ impl Statement {
         self.program.connection.dialect().format_error(error)
     }
 
-    /// Makes a trigger or foreign key action see the same current time as
-    /// the statement that runs it, as SQLite does.
-    pub(crate) fn set_current_time(&mut self, now: crate::WallClockInstant) {
-        self.state.current_time = Some(now);
-    }
-
-    /// Makes a trigger or foreign key action see the same
-    /// `statement_timestamp()` and `now()` as the statement that runs it.
-    pub(crate) fn set_statement_times(&mut self, times: crate::dialect::StatementTimes) {
-        self.state.statement_times = Some(times);
-    }
-
-    /// Makes a trigger or foreign key action stop at the deadline of the
-    /// statement that runs it.
-    pub(crate) fn set_query_deadline(&mut self, deadline: Option<crate::MonotonicInstant>) {
-        self.state.query_deadline = deadline;
+    /// Makes a trigger or foreign key action see the times and stop at the
+    /// deadline of the statement that runs it.
+    pub(crate) fn share_scope(&mut self, scope: crate::vdbe::StatementScope) {
+        self.state.scope = scope;
     }
 
     pub(crate) fn abort_subprogram(&mut self, err: Option<&LimboError>) -> Result<()> {

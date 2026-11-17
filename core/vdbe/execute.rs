@@ -6016,14 +6016,8 @@ pub fn op_program(
                 // so we must not call it again after the loop.
                 let mut subprogram_aborted = false;
                 loop {
-                    let now = *state
-                        .current_time
-                        .get_or_insert_with(|| pager.io.current_time_wall_clock());
-                    statement.set_current_time(now);
-                    statement.set_statement_times(*state.statement_times.get_or_insert_with(
-                        || crate::dialect::StatementTimes::new(now, &program.connection),
-                    ));
-                    statement.set_query_deadline(state.query_deadline);
+                    statement
+                        .share_scope(state.scope.share(pager.io.as_ref(), &program.connection));
                     let res = statement.step_subprogram();
                     match res {
                         Ok(step_result) => match step_result {
@@ -10396,12 +10390,12 @@ pub fn op_function(
             state.registers[*dest].set_null();
         }
         crate::function::Func::Scalar(scalar_func) => {
-            let clock = StatementClock::new(pager.io.as_ref(), &mut state.current_time);
+            let clock = StatementClock::new(pager.io.as_ref(), &mut state.scope.current_time);
             let context = ScalarFuncContext {
                 connection: &program.connection,
                 io: pager.io.as_ref(),
                 clock: &clock,
-                statement_times: Cell::from_mut(&mut state.statement_times),
+                statement_times: Cell::from_mut(&mut state.scope.statement_times),
                 collation: func.collation,
             };
             let value = program.connection.dialect().call_scalar(

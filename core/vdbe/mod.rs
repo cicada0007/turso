@@ -1109,9 +1109,7 @@ pub struct ProgramState {
     /// Indicate whether an [Insn::Once] instruction at a given program counter position has already been executed, well, once.
     once: SmallVec<[u32; 4]>,
     pub execution_state: ProgramExecutionState,
-    /// Per-execution statement deadline derived from the connection query timeout.
-    /// `None` means no timeout.
-    pub query_deadline: Option<crate::MonotonicInstant>,
+    pub(crate) scope: StatementScope,
     /// Excludes new root statements while an explicit checkpoint is suspended.
     pub(crate) explicit_checkpoint_guard: Option<crate::connection::ExplicitCheckpointGuard>,
     pub parameters: Vec<Value>,
@@ -1141,12 +1139,6 @@ pub struct ProgramState {
     /// `SQLITE_BUSY` halt through `op_halt`, which would mis-wrap it as
     /// a constraint error.
     pub sequence_inner_retry_count: u32,
-    /// The time "now" means for the date and time functions during the
-    /// current step. See `StatementClock`.
-    pub(crate) current_time: Option<crate::WallClockInstant>,
-    /// PostgreSQL's `statement_timestamp()` and `now()` for this statement;
-    /// `None` until it first asks for the time.
-    pub(crate) statement_times: Option<crate::dialect::StatementTimes>,
     #[cfg(feature = "json")]
     json_cache: JsonCacheCell,
     active_op_state: ActiveOpStateSlot,
@@ -1246,6 +1238,36 @@ pub struct ProgramState {
     pub(crate) pending_fresh_tx: Option<(usize, bool)>,
 }
 
+/// What a statement shares with the triggers and foreign key actions it
+/// runs. In SQLite these run on the statement's own VM (`OP_Program` pushes a
+/// `VdbeFrame`), so they see its `iCurrentTime`. Here each runs as its own
+/// statement and gets a copy of this value before every step.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct StatementScope {
+    /// When the statement stops, from the connection's query timeout. `None`
+    /// means no timeout.
+    pub(crate) query_deadline: Option<crate::MonotonicInstant>,
+    /// The time "now" means for the date and time functions during the
+    /// current step. See `StatementClock`.
+    pub(crate) current_time: Option<crate::WallClockInstant>,
+    /// PostgreSQL's `statement_timestamp()` and `now()` for this statement;
+    /// `None` until it first asks for the time.
+    pub(crate) statement_times: Option<crate::dialect::StatementTimes>,
+}
+
+impl StatementScope {
+    /// The scope for a trigger or foreign key action. Reads the times first if
+    /// the statement has not, so both see the same ones.
+    pub(crate) fn share(&mut self, clock: &dyn crate::Clock, connection: &Connection) -> Self {
+        let now = *self
+            .current_time
+            .get_or_insert_with(|| clock.current_time_wall_clock());
+        self.statement_times
+            .get_or_insert_with(|| crate::dialect::StatementTimes::new(now, connection));
+        *self
+    }
+}
+
 /// Lets an `arc_swap::Cache` follow the MvStore slot of a database.
 pub(crate) struct MvStoreHandle(Arc<crate::Database>);
 
@@ -1304,15 +1326,13 @@ impl ProgramState {
             ended_coroutine: vec![],
             once: SmallVec::<[u32; 4]>::new(),
             execution_state: ProgramExecutionState::Init,
-            query_deadline: None,
+            scope: StatementScope::default(),
             explicit_checkpoint_guard: None,
             parameters: Vec::new(),
             commit_state: CommitState::Ready,
             sequence_inner_commit: None,
             sequence_inner_tx_pending: None,
             sequence_inner_retry_count: 0,
-            current_time: None,
-            statement_times: None,
             #[cfg(feature = "json")]
             json_cache: JsonCacheCell::new(),
             active_op_state: ActiveOpStateSlot::default(),
@@ -1472,10 +1492,8 @@ impl ProgramState {
         self.ended_coroutine.clear();
         self.once.clear();
         self.execution_state = ProgramExecutionState::Init;
-        self.query_deadline = None;
+        self.scope = StatementScope::default();
         self.explicit_checkpoint_guard = None;
-        self.current_time = None;
-        self.statement_times = None;
         #[cfg(feature = "json")]
         self.json_cache.clear();
 
@@ -2300,6 +2318,7 @@ impl Program {
         }
         let connection_interrupt = self.connection.is_interrupted();
         let hit_query_deadline = state
+            .scope
             .query_deadline
             .is_some_and(|deadline| io.current_time_monotonic() >= deadline);
         let progress_interrupt = self
@@ -2620,7 +2639,7 @@ impl Program {
             _ => {}
         }
         if !matches!(result, ProgramStep::IO | ProgramStep::Yield) {
-            state.current_time = None;
+            state.scope.current_time = None;
         }
         return result;
 
@@ -2906,7 +2925,7 @@ impl Program {
         // function so it is a leaf.
         let quiet = !state.is_interrupted()
             && !self.connection.is_interrupted()
-            && state.query_deadline.is_none()
+            && state.scope.query_deadline.is_none()
             && progress_ops == 0;
         if quiet {
             return None;
