@@ -1936,11 +1936,11 @@ fn emit_fk_action_subprogram(
                 description,
             )
         })?;
-        subprogram_builder.epilogue(resolver.schema());
-        let built = subprogram_builder.build(connection.clone(), true, description)?;
-        let prepared = built.prepared().clone();
-        crate::translate::trigger_exec::begin_subprogram_transactions(
-            program, resolver, &prepared,
+        let prepared = program.build_subprogram(
+            subprogram_builder,
+            resolver.schema(),
+            connection,
+            description,
         )?;
         entry
             .slot

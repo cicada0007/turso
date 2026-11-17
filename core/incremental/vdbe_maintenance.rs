@@ -195,10 +195,9 @@ fn compile_maintenance_plan(
         schema,
         connection,
     )?;
-    program.epilogue(schema);
-    program.build(
+    program.build_view_maintenance(
+        schema,
         connection.clone(),
-        false,
         "materialized view DAG maintenance",
     )
 }

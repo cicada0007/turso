@@ -2343,6 +2343,80 @@ impl ProgramBuilder {
         }
     }
 
+    /// Finishes a trigger or foreign-key action program that this program
+    /// calls. A subprogram emits no Transaction opcodes, so this program takes
+    /// on every database the subprogram writes or reads, and the top-level
+    /// statement opens them all. SQLite records them on the top-level parse as
+    /// each is used (build.c `sqlite3BeginWriteOperation`,
+    /// `sqlite3CodeVerifySchemaAtToplevel`).
+    pub fn build_subprogram(
+        &mut self,
+        mut subprogram: ProgramBuilder,
+        schema: &Schema,
+        connection: &Arc<Connection>,
+        description: &str,
+    ) -> Result<Arc<PreparedProgram>> {
+        turso_assert!(
+            subprogram.flags.is_subprogram(),
+            "build_subprogram needs a subprogram builder"
+        );
+        subprogram.epilogue(schema);
+        for db_id in &subprogram.write_databases {
+            if db_id == crate::MAIN_DB_ID {
+                self.begin_write_operation()?;
+            } else {
+                let cookie = subprogram.write_database_cookies[&db_id];
+                self.begin_write_on_database(db_id, cookie)?;
+            }
+        }
+        for db_id in &subprogram.read_databases {
+            if db_id == crate::MAIN_DB_ID {
+                self.begin_read_operation()?;
+            } else {
+                let cookie = subprogram.read_database_cookies[&db_id];
+                self.begin_read_on_database(db_id, cookie)?;
+            }
+        }
+        let prepared = subprogram.finish_program(
+            PrepareContext::from_connection(connection),
+            connection.custom_collations(),
+            true,
+            description,
+        )?;
+        Ok(Arc::new(prepared))
+    }
+
+    /// Finishes a materialized view maintenance program. It runs inside the
+    /// transactions of the statement that changed the view's base tables, and
+    /// every cursor it opens is on the main database, so it needs no
+    /// databases of its own opened.
+    pub fn build_view_maintenance(
+        mut self,
+        schema: &Schema,
+        connection: Arc<Connection>,
+        description: &str,
+    ) -> Result<Program> {
+        turso_assert!(
+            self.flags.is_subprogram(),
+            "view maintenance runs as a subprogram"
+        );
+        self.epilogue(schema);
+        turso_assert!(
+            self.write_databases
+                .iter()
+                .chain(self.read_databases.iter())
+                .all(|db_id| db_id == crate::MAIN_DB_ID),
+            "view maintenance uses only the main database"
+        );
+        let prepared = self.finish_program(
+            PrepareContext::from_connection(&connection),
+            connection.custom_collations(),
+            false,
+            description,
+        )?;
+        Ok(Program::from_prepared(Arc::new(prepared), connection))
+    }
+
     /// Checks whether `table` or any of its indices has been opened in the program
     pub fn is_table_open(&self, table: &Table) -> bool {
         self.table_references.contains_table(table)
@@ -2550,7 +2624,23 @@ impl ProgramBuilder {
         });
     }
 
+    /// Finishes a top-level program. Subprograms are finished by
+    /// `build_subprogram` or `build_view_maintenance`.
     pub fn build_prepared_program(
+        self,
+        prepare_context: PrepareContext,
+        custom_collations: Vec<Arc<crate::function::ExternalCollation>>,
+        change_cnt_on: bool,
+        sql: &str,
+    ) -> crate::Result<PreparedProgram> {
+        turso_assert!(
+            !self.flags.is_subprogram(),
+            "a subprogram is finished by build_subprogram or build_view_maintenance"
+        );
+        self.finish_program(prepare_context, custom_collations, change_cnt_on, sql)
+    }
+
+    fn finish_program(
         mut self,
         prepare_context: PrepareContext,
         custom_collations: Vec<Arc<crate::function::ExternalCollation>>,
