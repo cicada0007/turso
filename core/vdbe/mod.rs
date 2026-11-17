@@ -238,7 +238,7 @@ pub(crate) fn step_view_delta_batch(
                 }
 
                 let statement = stmt.as_mut().expect("maintenance statement was just built");
-                match statement.step_subprogram(scope.share(pager.io.as_ref(), connection))? {
+                match statement.step_subprogram(scope)? {
                     StepResult::Done => {
                         *stmt = None;
                         *current_index += 1;
@@ -1245,8 +1245,9 @@ pub struct ProgramState {
 /// materialized view maintenance it runs. In SQLite triggers run on the
 /// statement's own VM (`OP_Program` pushes a `VdbeFrame`), so they see its
 /// `iCurrentTime`. Here each runs as its own statement, and
-/// `Statement::step_subprogram` takes a copy of this value for every step.
-#[derive(Debug, Clone, Copy, Default)]
+/// `Statement::step_subprogram` lends this value to it for every step, so a
+/// time the subprogram reads first is also the statement's time.
+#[derive(Debug, Default)]
 pub(crate) struct StatementScope {
     /// When the statement stops, from the connection's query timeout. `None`
     /// means no timeout.
@@ -1257,19 +1258,6 @@ pub(crate) struct StatementScope {
     /// The times `now()` and the clock functions return for this statement;
     /// `None` until a function first asks for them.
     pub(crate) statement_times: Option<crate::dialect::StatementTimes>,
-}
-
-impl StatementScope {
-    /// The scope for a subprogram the statement runs. Reads the times first if
-    /// the statement has not, so both see the same ones.
-    pub(crate) fn share(&mut self, clock: &dyn crate::Clock, connection: &Connection) -> Self {
-        let now = *self
-            .current_time
-            .get_or_insert_with(|| clock.current_time_wall_clock());
-        self.statement_times
-            .get_or_insert_with(|| crate::dialect::StatementTimes::new(now, connection));
-        *self
-    }
 }
 
 /// Lets an `arc_swap::Cache` follow the MvStore slot of a database.
@@ -2641,9 +2629,6 @@ impl Program {
                 state.execution_state = ProgramExecutionState::Failed;
             }
             _ => {}
-        }
-        if !matches!(result, ProgramStep::IO | ProgramStep::Yield) {
-            state.scope.current_time = None;
         }
         return result;
 

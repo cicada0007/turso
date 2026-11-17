@@ -158,3 +158,63 @@ fn current_time_does_not_change_within_one_step() {
         ]
     );
 }
+
+/// The trigger reads the time first, after row 1 is updated. Row 2's new value
+/// then reads it in the statement that fired the trigger, in the same step, so
+/// both see one time.
+#[test]
+fn a_time_a_trigger_reads_first_is_the_statement_time() {
+    let io = Arc::new(TestClockIo {
+        inner: MemoryIO::new(),
+        unix_secs: AtomicI64::new(1_000_000_000),
+        secs_added_per_read: 1,
+    });
+    let db = Database::open_file(io.clone(), ":memory:", Arc::new(SqliteDialect)).unwrap();
+    let conn = db
+        .connect(ConnectOpts::new(SessionRole::Superuser))
+        .unwrap();
+    conn.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER)")
+        .unwrap();
+    conn.execute("INSERT INTO t VALUES (1, 0), (2, 0)").unwrap();
+    conn.execute("CREATE TABLE log(at INTEGER)").unwrap();
+    conn.execute(
+        "CREATE TRIGGER tr AFTER UPDATE ON t WHEN new.id = 1 BEGIN \
+         INSERT INTO log VALUES (unixepoch()); END",
+    )
+    .unwrap();
+
+    // The `'now', id || ' seconds'` argument keeps row 2's read in its own row
+    // instead of once before the first row.
+    conn.execute(
+        "UPDATE t SET a = CASE id WHEN 1 THEN 0 \
+         ELSE unixepoch('now', id || ' seconds') - id END",
+    )
+    .unwrap();
+
+    let logged: Vec<(i64,)> = conn.exec_rows("SELECT at FROM log");
+    assert_eq!(logged, vec![(1_000_000_000,)]);
+    let updated: Vec<(i64,)> = conn.exec_rows("SELECT a FROM t WHERE id = 2");
+    assert_eq!(updated, vec![(1_000_000_000,)]);
+}
+
+#[test]
+fn a_trigger_that_reads_no_time_does_not_read_the_clock() {
+    let io = Arc::new(TestClockIo {
+        inner: MemoryIO::new(),
+        unix_secs: AtomicI64::new(1_000_000_000),
+        secs_added_per_read: 1,
+    });
+    let db = Database::open_file(io.clone(), ":memory:", Arc::new(SqliteDialect)).unwrap();
+    let conn = db
+        .connect(ConnectOpts::new(SessionRole::Superuser))
+        .unwrap();
+    conn.execute("CREATE TABLE t(a INTEGER)").unwrap();
+    conn.execute("CREATE TABLE log(a INTEGER)").unwrap();
+    conn.execute("CREATE TRIGGER tr AFTER INSERT ON t BEGIN INSERT INTO log VALUES (new.a); END")
+        .unwrap();
+    let before = io.unix_secs.load(Ordering::SeqCst);
+
+    conn.execute("INSERT INTO t VALUES (1), (2)").unwrap();
+
+    assert_eq!(io.unix_secs.load(Ordering::SeqCst), before);
+}

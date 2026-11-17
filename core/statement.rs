@@ -285,6 +285,10 @@ impl Statement {
         origin: StatementOrigin,
         nested_guard_active: bool,
     ) -> Self {
+        turso_assert!(
+            (origin == StatementOrigin::Subprogram) == program.is_subprogram,
+            "a statement is a subprogram exactly when its program was built as one"
+        );
         let (max_registers, cursor_count) = match query_mode {
             QueryMode::Normal => (program.max_registers, program.cursor_ref.len()),
             QueryMode::Explain => (EXPLAIN_COLUMNS.len(), 0),
@@ -479,11 +483,32 @@ impl Statement {
         }
     }
 
+    /// One step of the statement. "now" stays the same for the whole step,
+    /// triggers and foreign-key actions included, as SQLite clears
+    /// `iCurrentTime` once per `sqlite3VdbeExec` (vdbe.c). A step that waits
+    /// on I/O or in the busy handler is the same step when it continues.
+    fn _step(&mut self, waker: Option<&Waker>) -> Result<StepResult> {
+        turso_assert!(
+            self.origin != StatementOrigin::Subprogram,
+            "a subprogram steps only through step_subprogram"
+        );
+        let result = self.step_program(waker);
+        match &result {
+            // The statement continues where it stopped. SQLite waits for I/O
+            // and runs the busy handler inside one `sqlite3VdbeExec`.
+            Ok(StepResult::IO | StepResult::Yield | StepResult::Sleep { .. }) => {}
+            Ok(StepResult::Row | StepResult::Done | StepResult::Busy | StepResult::Interrupt)
+            | Err(_) => self.state.scope.current_time = None,
+        }
+        result
+    }
+
     /// Every step of a statement passes through here, so the work that only
     /// matters on the first call, the last call, a busy wait or an error is
     /// gated behind cheap flag tests and kept out of line. A row in the middle
     /// of a scan runs only the interpreter call and the result-row bookkeeping.
-    fn _step(&mut self, waker: Option<&Waker>) -> Result<StepResult> {
+    #[inline(always)]
+    fn step_program(&mut self, waker: Option<&Waker>) -> Result<StepResult> {
         // ANALYZE already ran to Done; only its stats refresh is outstanding.
         // Checked first: the root-statement count was released at Done, so
         // `prepare_step` must not re-register this statement as a root.
@@ -772,17 +797,25 @@ impl Statement {
 
     /// Fast step for trigger/FK subprograms: skips reprepare checks, timeout
     /// arming, busy handler, metrics recording, and schema retry.
-    /// The parent statement handles all of those concerns, and passes its
-    /// `scope` so the subprogram sees its times and stops at its deadline.
+    /// The parent statement handles all of those concerns, and lends its
+    /// `scope` so the subprogram sees its times and stops at its deadline,
+    /// and a time the subprogram reads first is the parent's time too.
     #[inline]
     pub(crate) fn step_subprogram(
         &mut self,
-        scope: crate::vdbe::StatementScope,
+        scope: &mut crate::vdbe::StatementScope,
     ) -> Result<StepResult> {
-        self.state.scope = scope;
-        self.program
+        turso_assert!(
+            self.origin == StatementOrigin::Subprogram,
+            "only a subprogram borrows its caller's scope"
+        );
+        self.state.scope = std::mem::take(scope);
+        let result = self
+            .program
             .step(&mut self.state, &self.pager, self.query_mode, None)
-            .map_err(|err| *err)
+            .map_err(|err| *err);
+        *scope = std::mem::take(&mut self.state.scope);
+        result
     }
 
     fn format_error(&self, error: LimboError) -> LimboError {

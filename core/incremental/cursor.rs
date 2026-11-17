@@ -6,7 +6,7 @@ use crate::storage::btree::{BTreeKey, CursorStep, CursorTrait, SavePositionResul
 use crate::sync::Arc;
 use crate::types::{IOResultOr, ImmutableRecord, IndexInfo};
 use crate::{
-    return_if_io,
+    return_if_io, turso_assert,
     types::{IOResult, SeekKey, SeekOp, SeekResult, Value},
     LimboError, Pager, Register,
 };
@@ -34,8 +34,9 @@ pub struct MaterializedViewCursor {
     // read before its enclosing write statement reaches Halt.
     view_delta_state: crate::vdbe::ViewDeltaApplyState,
 
-    // The scope of the statement that opened the cursor, so maintenance run
-    // from a read stops at that statement's deadline.
+    // Holds only the deadline of the statement that opened the cursor, so
+    // maintenance run from a read stops at that deadline. Maintenance never
+    // reads the clock: views refuse date and time functions.
     scope: crate::vdbe::StatementScope,
 }
 
@@ -44,7 +45,7 @@ impl MaterializedViewCursor {
         btree_cursor: Box<dyn CursorTrait>,
         pager: Arc<Pager>,
         connection: Arc<crate::Connection>,
-        scope: crate::vdbe::StatementScope,
+        query_deadline: Option<crate::MonotonicInstant>,
     ) -> Self {
         Self {
             btree_cursor,
@@ -52,7 +53,10 @@ impl MaterializedViewCursor {
             connection,
             last_change_log_revision: 0,
             view_delta_state: crate::vdbe::ViewDeltaApplyState::NotStarted,
-            scope,
+            scope: crate::vdbe::StatementScope {
+                query_deadline,
+                ..Default::default()
+            },
         }
     }
 
@@ -68,13 +72,18 @@ impl MaterializedViewCursor {
             return Ok(IOResult::Done(()));
         }
 
-        match crate::vdbe::step_view_delta_batch(
+        let step = crate::vdbe::step_view_delta_batch(
             &self.connection,
             &mut self.view_delta_state,
             false,
             &self.pager,
             &mut self.scope,
-        )? {
+        )?;
+        turso_assert!(
+            self.scope.current_time.is_none() && self.scope.statement_times.is_none(),
+            "view maintenance never reads the clock"
+        );
+        match step {
             IOResult::IO(io) => Ok(IOResult::IO(io)),
             IOResult::Done(()) => {
                 self.view_delta_state = crate::vdbe::ViewDeltaApplyState::NotStarted;
@@ -355,12 +364,7 @@ mod tests {
         let tx_state = conn.transaction_changes.view_subscription(view_name);
 
         // Create the materialized view cursor
-        let cursor = MaterializedViewCursor::new(
-            btree_cursor,
-            pager.clone(),
-            conn.clone(),
-            crate::vdbe::StatementScope::default(),
-        );
+        let cursor = MaterializedViewCursor::new(btree_cursor, pager.clone(), conn.clone(), None);
         cursor.register_with_pager();
 
         Ok((cursor, tx_state, pager))
