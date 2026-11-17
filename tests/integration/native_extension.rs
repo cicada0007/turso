@@ -327,15 +327,30 @@ fn now_reads_the_same_clock_as_sqlite_now() {
         ),
     );
     let rows = conn
-        .prepare(
-            "SELECT strftime('%Y-%m-%d %H:%M:%f', 'now'), pause(), \
-             strftime('%Y-%m-%d %H:%M:%f', now())",
-        )
+        .prepare("SELECT strftime('%Y-%m-%d %H:%M:%f', 'now'), pause(), now()")
         .unwrap()
         .run_collect_rows()
         .unwrap();
     let [row] = <[Vec<Value>; 1]>::try_from(rows).unwrap();
-    assert_eq!(row[0], row[2], "'now' and now() differ: {row:?}");
+    let sqlite_now = row[0].to_text().expect("strftime returns text");
+    let now = row[2].to_text().expect("now() returns text");
+    assert_eq!(
+        sqlite_now,
+        cut_to_milliseconds(now),
+        "'now' and now() differ: {row:?}"
+    );
+}
+
+/// `now()` text such as `2024-01-05 10:00:00.123456`, cut to the whole
+/// milliseconds that `'now'` keeps. Rounding instead, as `strftime('%f', now())`
+/// does, would turn `.834567` into `.835` while `'now'` gives `.834`.
+fn cut_to_milliseconds(timestamp: &str) -> String {
+    let (seconds, fraction) = match timestamp.split_once('.') {
+        Some((seconds, fraction)) => (seconds, fraction),
+        // Whole seconds print without a fraction.
+        None => (timestamp, ""),
+    };
+    format!("{seconds}.{fraction:0<3.3}")
 }
 
 #[test]
