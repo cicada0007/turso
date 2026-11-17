@@ -5793,7 +5793,9 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "a transaction kept open for a nested statement was ended by another")]
+    #[should_panic(
+        expected = "a transaction kept open for a nested statement was ended by another"
+    )]
     fn kept_open_transaction_panics_when_another_ended_it() {
         let db = Database::open_file(
             Arc::new(crate::MemoryIO::new()),

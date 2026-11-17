@@ -34,7 +34,10 @@ fn test_wal_insert_begin_inside_a_transaction_errors(db: TempDatabase) {
     conn.execute("BEGIN").unwrap();
     let result = conn.wal_insert_begin();
     assert!(
-        matches!(result, Err(turso_core::LimboError::TransactionAlreadyActive)),
+        matches!(
+            result,
+            Err(turso_core::LimboError::TransactionAlreadyActive)
+        ),
         "{result:?}"
     );
     conn.execute("COMMIT").unwrap();
