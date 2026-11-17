@@ -139,37 +139,46 @@ pub struct OwnerColumn {
 /// functions get the same one, as every SQLite function gets a
 /// `sqlite3_context`.
 pub struct ScalarFuncContext<'a> {
-    pub connection: &'a Arc<Connection>,
-    pub io: &'a dyn IO,
+    connection: &'a Arc<Connection>,
+    io: &'a dyn IO,
     /// The statement's clock: every function of one step sees the same time.
-    pub clock: &'a dyn Clock,
-    /// The statement's times; `None` until it first asks for PostgreSQL's time.
-    pub statement_times: &'a Cell<Option<StatementTimes>>,
+    clock: &'a dyn Clock,
+    /// The statement's times; `None` until a function first asks for them.
+    statement_times: &'a Cell<Option<StatementTimes>>,
     /// The collation of the call site, for functions that compare arguments.
-    pub collation: CollationSeq,
+    collation: CollationSeq,
 }
 
-impl ScalarFuncContext<'_> {
-    /// PostgreSQL's `now()`: when the transaction began. A statement in
-    /// autocommit is its own transaction.
+impl<'a> ScalarFuncContext<'a> {
+    pub fn new(
+        connection: &'a Arc<Connection>,
+        io: &'a dyn IO,
+        clock: &'a dyn Clock,
+        statement_times: &'a Cell<Option<StatementTimes>>,
+        collation: CollationSeq,
+    ) -> Self {
+        Self {
+            connection,
+            io,
+            clock,
+            statement_times,
+            collation,
+        }
+    }
+
+    pub fn connection(&self) -> &'a Arc<Connection> {
+        self.connection
+    }
+
+    /// When the transaction began. A statement in autocommit is its own
+    /// transaction.
     pub fn transaction_time(&self) -> WallClockInstant {
         self.statement_times().transaction
     }
 
-    /// PostgreSQL's `clock_timestamp()`: the time of the call. Fixes the
-    /// statement's times first, so `statement_timestamp() <= clock_timestamp()`
-    /// whichever the query calls first.
-    pub fn clock_time(&self) -> WallClockInstant {
-        self.statement_times();
-        self.io.current_time_wall_clock()
-    }
-
-    /// PostgreSQL's `statement_timestamp()`.
-    pub fn statement_time(&self) -> WallClockInstant {
-        self.statement_times().statement
-    }
-
-    fn statement_times(&self) -> StatementTimes {
+    /// The statement's times, read on the first call and the same for the
+    /// rest of the statement.
+    pub fn statement_times(&self) -> StatementTimes {
         if let Some(times) = self.statement_times.get() {
             return times;
         }
@@ -184,15 +193,14 @@ impl ScalarFuncContext<'_> {
 /// statement begins or ends a transaction on the connection meanwhile.
 #[derive(Debug, Clone, Copy)]
 pub struct StatementTimes {
-    /// PostgreSQL's `statement_timestamp()`.
+    /// When the statement first asked for the time.
     pub statement: WallClockInstant,
-    /// PostgreSQL's `now()`: when the open user transaction began, or
-    /// `statement` in autocommit.
+    /// When the open user transaction began, or `statement` in autocommit.
     pub transaction: WallClockInstant,
 }
 
 impl StatementTimes {
-    pub fn new(statement: WallClockInstant, connection: &Connection) -> Self {
+    pub(crate) fn new(statement: WallClockInstant, connection: &Connection) -> Self {
         let transaction = match connection.transaction_time() {
             Some(start) => start,
             None => statement,

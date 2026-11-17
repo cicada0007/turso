@@ -37,7 +37,7 @@ macro_rules! scalar_functions {
         $($(
             #[allow(unused_variables)]
             let step = |$context: &ScalarFuncContext<'_>, $args: &[Register]| -> Result<_> {
-                let $connection = $context.connection;
+                let $connection = $context.connection();
                 Ok($body)
             };
             options = options.extension_function(pg_scalar_function(
@@ -157,10 +157,14 @@ fn register_scalar_functions(options: OpenOptions) -> OpenOptions {
             Timestamptz(format_timestamptz(context.transaction_time())?)
         },
         "statement_timestamp"(FunctionArity::Exact(0), false) => {
-            Timestamptz(format_timestamptz(context.statement_time())?)
+            Timestamptz(format_timestamptz(context.statement_times().statement)?)
         },
         "clock_timestamp"(FunctionArity::Exact(0), false) => {
-            Timestamptz(format_timestamptz(context.clock_time())?)
+            // Fixes the statement's times first, so that
+            // statement_timestamp() <= clock_timestamp() whichever the query
+            // calls first.
+            context.statement_times();
+            Timestamptz(format_timestamptz(connection.get_pager().io.current_time_wall_clock())?)
         },
     })
 }

@@ -122,13 +122,13 @@ fn native_scalar_borrows_the_same_registers_across_io() {
     let mut state = turso_core::native_ext::ExtensionState::None;
     let io = conn.get_pager().io.clone();
     let statement_times = std::cell::Cell::new(None);
-    let context = ScalarFuncContext {
-        connection: &conn,
-        io: io.as_ref(),
-        clock: io.as_ref(),
-        statement_times: &statement_times,
-        collation: turso_core::CollationSeq::BINARY,
-    };
+    let context = ScalarFuncContext::new(
+        &conn,
+        io.as_ref(),
+        io.as_ref(),
+        &statement_times,
+        turso_core::CollationSeq::BINARY,
+    );
     let value = finish(&queue, || {
         function.func.call_scalar(&mut state, &context, &args)
     });
@@ -259,7 +259,7 @@ impl ScalarCall for ConnectionContextCall {
     type Output = Value;
 
     fn step(&mut self, context: &ScalarFuncContext<'_>, args: &[Register]) -> IOResultOr<Value> {
-        let connection = context.connection;
+        let connection = context.connection();
         if integer(args[0].get_value()) == 0 {
             let context = connection.context::<AtomicI64>().ok_or_else(|| {
                 LimboError::ExtensionError("connection context is required".into())
@@ -666,7 +666,7 @@ impl ScalarCall for ConnectionChanges {
     type Output = Value;
 
     fn step(&mut self, context: &ScalarFuncContext<'_>, args: &[Register]) -> IOResultOr<Value> {
-        let connection = context.connection;
+        let connection = context.connection();
         Ok(IOResult::Done(Value::from_i64(
             connection.changes() * 10 + integer(args[0].get_value()),
         )))
@@ -2255,7 +2255,7 @@ impl ScalarCall for NestedSumCall {
     type Output = Value;
 
     fn step(&mut self, context: &ScalarFuncContext<'_>, args: &[Register]) -> IOResultOr<Value> {
-        let connection = context.connection;
+        let connection = context.connection();
         if self.statement.is_none() {
             self.statement = Some(connection.prepare_internal("SELECT x FROM input_values")?);
         }

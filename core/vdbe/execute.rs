@@ -11294,13 +11294,13 @@ fn with_scalar_context<T>(
     call: impl FnOnce(&ScalarFuncContext<'_>) -> T,
 ) -> T {
     let clock = StatementClock::new(io, &mut scope.current_time);
-    let context = ScalarFuncContext {
+    let context = ScalarFuncContext::new(
         connection,
         io,
-        clock: &clock,
-        statement_times: Cell::from_mut(&mut scope.statement_times),
+        &clock,
+        Cell::from_mut(&mut scope.statement_times),
         collation,
-    };
+    );
     call(&context)
 }
 

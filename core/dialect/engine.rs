@@ -633,7 +633,7 @@ pub fn call_builtin_scalar(
     func: &ScalarFunc,
     args: &[Register],
 ) -> crate::Result<Value> {
-    let connection = context.connection;
+    let connection = context.connection();
     match func {
         ScalarFunc::Array | ScalarFunc::ArrayElement | ScalarFunc::ArraySetElement => {
             unreachable!("desugared to dedicated instructions, not Function")

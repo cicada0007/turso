@@ -11,7 +11,7 @@ pub(crate) fn register_functions(options: OpenOptions) -> OpenOptions {
             FunctionArity::Exact(0),
             false,
             |context, _| {
-                claim(context.connection, "request.jwt.claim.sub", "sub")?
+                claim(context.connection(), "request.jwt.claim.sub", "sub")?
                     .map(|sub| canonical_uuid(&sub).map(Uuid))
                     .transpose()
             },
@@ -20,13 +20,13 @@ pub(crate) fn register_functions(options: OpenOptions) -> OpenOptions {
             "auth.email",
             FunctionArity::Exact(0),
             false,
-            |context, _| claim(context.connection, "request.jwt.claim.email", "email"),
+            |context, _| claim(context.connection(), "request.jwt.claim.email", "email"),
         ))
         .extension_function(pg_scalar_function(
             "auth.jwt",
             FunctionArity::Exact(0),
             false,
-            |context, _| jwt(context.connection),
+            |context, _| jwt(context.connection()),
         ))
 }
 
