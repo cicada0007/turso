@@ -2559,6 +2559,9 @@ impl Connection {
     /// Start WAL session by initiating read+write transaction for this connection
     #[cfg(all(feature = "fs", feature = "conn_raw_api"))]
     pub fn wal_insert_begin(&self) -> Result<()> {
+        if !self.get_auto_commit() {
+            return Err(LimboError::TransactionAlreadyActive);
+        }
         let pager = self.pager.load();
         pager.begin_read_tx()?;
         // Sync-engine drives WAL maintenance explicitly: any auto-restart of
@@ -3151,7 +3154,12 @@ impl Connection {
     /// `SAVEPOINT` outside a transaction, or `wal_insert_begin`.
     pub(crate) fn begin_user_transaction(&self) {
         let began = self.db.io.current_time_wall_clock();
-        *self.txn_owner.0.write() = TxnOwner::User { began };
+        let mut owner = self.txn_owner.0.write();
+        turso_assert!(
+            *owner == TxnOwner::Autocommit,
+            "a transaction began inside another one"
+        );
+        *owner = TxnOwner::User { began };
     }
 
     /// Leaves autocommit for a transaction the engine runs for itself, which

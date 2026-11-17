@@ -28,6 +28,18 @@ fn test_wal_frame_count(db: TempDatabase) {
     assert_eq!(conn.wal_state().unwrap().max_frame, 15);
 }
 
+#[turso_macros::test()]
+fn test_wal_insert_begin_inside_a_transaction_errors(db: TempDatabase) {
+    let conn = db.connect_limbo();
+    conn.execute("BEGIN").unwrap();
+    let result = conn.wal_insert_begin();
+    assert!(
+        matches!(result, Err(turso_core::LimboError::TransactionAlreadyActive)),
+        "{result:?}"
+    );
+    conn.execute("COMMIT").unwrap();
+}
+
 // TODO: mvcc
 #[turso_macros::test()]
 fn test_wal_frame_transfer_no_schema_changes(db: TempDatabase) {
