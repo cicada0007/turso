@@ -84,29 +84,28 @@ does for the step time: the value lives next to the thing it belongs to.
   `enum TxnOwner { Autocommit, User { began }, Engine }`. `began` is the transaction time, so
   there is no second field that has to agree with it. `Connection::begin_user_transaction`
   reads the I/O clock where a user transaction starts: `BEGIN`, a `SAVEPOINT` that starts a
-  transaction, and `wal_insert_begin`. That is PostgreSQL's rule: the time of `BEGIN`. Every
-  return to autocommit goes through `Connection::end_transaction`.
+  transaction, and `wal_insert_begin`. That is PostgreSQL's rule: the time of `BEGIN`. It
+  asserts that the connection is in autocommit, and `wal_insert_begin` refuses to run inside a
+  transaction. Every return to autocommit goes through `Connection::end_transaction`.
 - The transactions the engine runs for itself, VACUUM and reading the schema back after a
   schema change in autocommit, are `TxnOwner::Engine`, which has no time, so a statement
   inside one uses its own statement time. Reading the schema back inside a user transaction
   keeps the user's time.
 - Under MVCC, `nextval` runs in a transaction of its own. When the statement fails before that
-  transaction commits, `Program::abort` first rolls it back and puts the outer transaction back,
-  time included (#11679).
-- One method decides what "now" means for the PostgreSQL clock, and `clock_timestamp()` fixes
-  the statement time before it reads the clock. They are methods of `ScalarFuncContext`, which
-  gets `StatementScope.statement_times` as a `Cell`:
+  transaction commits, `Program::abort` first ends it and puts the outer transaction back, time
+  included (#11679). If its commit had begun, dropping the commit ends it: a rollback on top
+  would undo a commit that group commit took over.
+- `ScalarFuncContext::statement_times()` reads the statement's times on the first request and
+  returns the same ones after that. The context gets `StatementScope.statement_times` as a
+  `Cell` in a private field, so no function can write it. tursopg's `clock_timestamp()` fixes
+  the statement's times before it reads the clock:
 
   ```rust
-  fn transaction_time(&self) -> WallClockInstant {
-      self.statement_times().transaction
-  }
-
-  fn clock_time(&self) -> WallClockInstant {
+  "clock_timestamp"(FunctionArity::Exact(0), false) => {
       // statement_timestamp() <= clock_timestamp() whichever the query calls first.
-      self.statement_times();
-      self.io.current_time_wall_clock()
-  }
+      context.statement_times();
+      Timestamptz(format_timestamptz(connection.get_pager().io.current_time_wall_clock())?)
+  },
   ```
 
   The times are read lazily: a statement that never asks for the time never reads the clock.
@@ -122,10 +121,12 @@ does for the step time: the value lives next to the thing it belongs to.
   PostgreSQL's statement start; the order above still holds.
 - `BEGIN` reads the clock once per transaction even if nothing asks for the time, because
   PostgreSQL's `now()` is the time of `BEGIN` and can't be read later.
-- Triggers and FK actions get a copy of the parent's `StatementScope` (deadline, `current_time`,
-  `statement_times`) before each step, as SQLite's run on the parent's VM and read its
-  `iCurrentTime`. `StatementScope::share` fixes the parent's times first, so a trigger that
-  reads the time first can't fix its own copy and leave the parent a different one.
+- Triggers, FK actions and materialized view maintenance get a copy of the parent's
+  `StatementScope` (deadline, `current_time`, `statement_times`) before each step, as SQLite's
+  run on the parent's VM and read its `iCurrentTime`. `Statement::step_subprogram` takes the
+  scope as an argument, so no caller can step a subprogram without one.
+  `StatementScope::share` fixes the parent's times first, so a trigger that reads the time
+  first can't fix its own copy and leave the parent a different one.
 - MVCC: `BEGIN CONCURRENT` is a transaction like any other. The one MVCC-only path is the
   `nextval` transaction above.
 - The SQLite functions (`date('now')`, `CURRENT_TIMESTAMP` in tursodb) keep the per-step SQLite
@@ -145,8 +146,8 @@ reads the statement's time through it (`sqlite3StmtCurrentTime`):
 |---|---|---|---|
 | `now()` | timestamptz | `transaction_time` | core `ScalarFunc::Now` (both dialects) |
 | `transaction_timestamp()` | timestamptz | `transaction_time` | tursopg native function |
-| `statement_timestamp()` | timestamptz | `statement_time` | tursopg native function |
-| `clock_timestamp()` | timestamptz | `clock_time` | tursopg native function |
+| `statement_timestamp()` | timestamptz | `statement_times().statement` | tursopg native function |
+| `clock_timestamp()` | timestamptz | the I/O clock, after `statement_times()` | tursopg native function |
 
 tursodb gets `now()` and nothing else (Q3). Values are written by step 1's formatter
 (`format_timestamptz`), so `now()` has the same text as a stored `timestamptz`. The four
@@ -167,7 +168,7 @@ function of its own, cast to the keyword's type:
 | `LOCALTIME` | `CAST(localtime_keyword() AS time)` | time |
 | `CURRENT_TIME` | error | (PostgreSQL: timetz) |
 
-- `PostgresDialect::resolve_function` resolves the four functions as `now()`.
+- `PostgresDialect::resolve_function` resolves the four functions to `ScalarFunc::Now`.
 - Each keyword has its own function so that the catalogs (`pg_attrdef`, `pg_get_expr`) can show
   the keyword that was written, as PostgreSQL does, and not `now()`. The table of keywords and
   functions is `TIME_KEYWORDS` in the tursopg translator.
