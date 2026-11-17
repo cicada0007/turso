@@ -141,6 +141,7 @@ pub(crate) fn step_view_delta_batch(
     state: &mut ViewDeltaApplyState,
     rollback: bool,
     pager: &Arc<Pager>,
+    scope: StatementScope,
 ) -> Result<IOResult<()>> {
     loop {
         match state {
@@ -237,7 +238,7 @@ pub(crate) fn step_view_delta_batch(
                 }
 
                 let statement = stmt.as_mut().expect("maintenance statement was just built");
-                match statement.step_subprogram()? {
+                match statement.step_subprogram(scope)? {
                     StepResult::Done => {
                         *stmt = None;
                         *current_index += 1;
@@ -1238,10 +1239,11 @@ pub struct ProgramState {
     pub(crate) pending_fresh_tx: Option<(usize, bool)>,
 }
 
-/// What a statement shares with the triggers and foreign key actions it
-/// runs. In SQLite these run on the statement's own VM (`OP_Program` pushes a
-/// `VdbeFrame`), so they see its `iCurrentTime`. Here each runs as its own
-/// statement and gets a copy of this value before every step.
+/// What a statement shares with the triggers, foreign key actions and
+/// materialized view maintenance it runs. In SQLite triggers run on the
+/// statement's own VM (`OP_Program` pushes a `VdbeFrame`), so they see its
+/// `iCurrentTime`. Here each runs as its own statement, and
+/// `Statement::step_subprogram` takes a copy of this value for every step.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct StatementScope {
     /// When the statement stops, from the connection's query timeout. `None`
@@ -1250,13 +1252,13 @@ pub(crate) struct StatementScope {
     /// The time "now" means for the date and time functions during the
     /// current step. See `StatementClock`.
     pub(crate) current_time: Option<crate::WallClockInstant>,
-    /// PostgreSQL's `statement_timestamp()` and `now()` for this statement;
-    /// `None` until it first asks for the time.
+    /// The times `now()` and the clock functions return for this statement;
+    /// `None` until a function first asks for them.
     pub(crate) statement_times: Option<crate::dialect::StatementTimes>,
 }
 
 impl StatementScope {
-    /// The scope for a trigger or foreign key action. Reads the times first if
+    /// The scope for a subprogram the statement runs. Reads the times first if
     /// the statement has not, so both see the same ones.
     pub(crate) fn share(&mut self, clock: &dyn crate::Clock, connection: &Connection) -> Self {
         let now = *self
@@ -3066,11 +3068,13 @@ impl Program {
         rollback: bool,
         pager: &Arc<Pager>,
     ) -> Result<IOResult<()>> {
+        let scope = state.scope.share(pager.io.as_ref(), &self.connection);
         match step_view_delta_batch(
             &self.connection,
             &mut state.view_delta_state,
             rollback,
             pager,
+            scope,
         )? {
             IOResult::IO(io) => Ok(IOResult::IO(io)),
             IOResult::Done(()) => {

@@ -33,13 +33,18 @@ pub struct MaterializedViewCursor {
     // In-progress maintenance batch, parked across I/O yields when a view is
     // read before its enclosing write statement reaches Halt.
     view_delta_state: crate::vdbe::ViewDeltaApplyState,
+
+    // The scope of the statement that opened the cursor, so maintenance run
+    // from a read stops at that statement's deadline.
+    scope: crate::vdbe::StatementScope,
 }
 
 impl MaterializedViewCursor {
-    pub fn new(
+    pub(crate) fn new(
         btree_cursor: Box<dyn CursorTrait>,
         pager: Arc<Pager>,
         connection: Arc<crate::Connection>,
+        scope: crate::vdbe::StatementScope,
     ) -> Self {
         Self {
             btree_cursor,
@@ -47,6 +52,7 @@ impl MaterializedViewCursor {
             connection,
             last_change_log_revision: 0,
             view_delta_state: crate::vdbe::ViewDeltaApplyState::NotStarted,
+            scope,
         }
     }
 
@@ -67,6 +73,7 @@ impl MaterializedViewCursor {
             &mut self.view_delta_state,
             false,
             &self.pager,
+            self.scope,
         )? {
             IOResult::IO(io) => Ok(IOResult::IO(io)),
             IOResult::Done(()) => {
@@ -348,7 +355,12 @@ mod tests {
         let tx_state = conn.transaction_changes.view_subscription(view_name);
 
         // Create the materialized view cursor
-        let cursor = MaterializedViewCursor::new(btree_cursor, pager.clone(), conn.clone());
+        let cursor = MaterializedViewCursor::new(
+            btree_cursor,
+            pager.clone(),
+            conn.clone(),
+            crate::vdbe::StatementScope::default(),
+        );
         cursor.register_with_pager();
 
         Ok((cursor, tx_state, pager))

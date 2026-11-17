@@ -1311,10 +1311,12 @@ pub fn op_open_read(
 
             // The cursor observes the transaction-wide change-log generation
             // for read-your-own-writes.
+            let scope = state.scope.share(pager.io.as_ref(), &program.connection);
             let view_cursor = crate::incremental::cursor::MaterializedViewCursor::new(
                 cursor.into_dyn(),
                 pager,
                 program.connection.clone(),
+                scope,
             );
 
             cursors
@@ -6016,9 +6018,8 @@ pub fn op_program(
                 // so we must not call it again after the loop.
                 let mut subprogram_aborted = false;
                 loop {
-                    statement
-                        .share_scope(state.scope.share(pager.io.as_ref(), &program.connection));
-                    let res = statement.step_subprogram();
+                    let res = statement
+                        .step_subprogram(state.scope.share(pager.io.as_ref(), &program.connection));
                     match res {
                         Ok(step_result) => match step_result {
                             StepResult::Done => break,
@@ -15241,6 +15242,7 @@ pub fn op_populate_materialized_views(
             )));
         }
 
+        let scope = state.scope.share(pager.io.as_ref(), &program.connection);
         let populate_state = state
             .populate_matviews_state
             .as_mut()
@@ -15249,7 +15251,7 @@ pub fn op_populate_materialized_views(
             .stmt
             .as_mut()
             .expect("population statement was just built");
-        match statement.step_subprogram()? {
+        match statement.step_subprogram(scope)? {
             StepResult::Done => {
                 populate_state.stmt = None;
                 populate_state.view_idx += 1;

@@ -772,9 +772,14 @@ impl Statement {
 
     /// Fast step for trigger/FK subprograms: skips reprepare checks, timeout
     /// arming, busy handler, metrics recording, and schema retry.
-    /// The parent statement handles all of those concerns.
+    /// The parent statement handles all of those concerns, and passes its
+    /// `scope` so the subprogram sees its times and stops at its deadline.
     #[inline]
-    pub fn step_subprogram(&mut self) -> Result<StepResult> {
+    pub(crate) fn step_subprogram(
+        &mut self,
+        scope: crate::vdbe::StatementScope,
+    ) -> Result<StepResult> {
+        self.state.scope = scope;
         self.program
             .step(&mut self.state, &self.pager, self.query_mode, None)
             .map_err(|err| *err)
@@ -782,12 +787,6 @@ impl Statement {
 
     fn format_error(&self, error: LimboError) -> LimboError {
         self.program.connection.dialect().format_error(error)
-    }
-
-    /// Makes a trigger or foreign key action see the times and stop at the
-    /// deadline of the statement that runs it.
-    pub(crate) fn share_scope(&mut self, scope: crate::vdbe::StatementScope) {
-        self.state.scope = scope;
     }
 
     pub(crate) fn abort_subprogram(&mut self, err: Option<&LimboError>) -> Result<()> {
