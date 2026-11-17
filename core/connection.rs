@@ -491,6 +491,10 @@ pub(crate) struct KeptOpenTransaction {
 impl Drop for KeptOpenTransaction {
     fn drop(&mut self) {
         if self.began_here {
+            turso_assert!(
+                *self.connection.txn_owner.0.read() == TxnOwner::Engine,
+                "a transaction kept open for a nested statement was ended by another"
+            );
             self.connection.end_transaction();
         }
     }
@@ -5786,5 +5790,22 @@ mod tests {
         conn.install_schema_keeping_dialect_schema(&fresh).unwrap();
 
         assert!(conn.schema.read().dialect_schema.is_some());
+    }
+
+    #[test]
+    #[should_panic(expected = "a transaction kept open for a nested statement was ended by another")]
+    fn kept_open_transaction_panics_when_another_ended_it() {
+        let db = Database::open_file(
+            Arc::new(crate::MemoryIO::new()),
+            ":memory:",
+            Arc::new(EngineDialect),
+        )
+        .unwrap();
+        let conn = db
+            .connect(ConnectOpts::new(SessionRole::Superuser))
+            .unwrap();
+        let kept = conn.keep_transaction_open();
+        conn.end_transaction();
+        drop(kept);
     }
 }
