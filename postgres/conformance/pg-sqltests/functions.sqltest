@@ -90,6 +90,14 @@ test quote-ident-null-is-null {
 expect {
 }
 
+test quote-ident-bytea-errors {
+    SELECT quote_ident('\x01'::bytea);
+}
+@sqlstate 42883
+expect error {
+    function quote_ident\(bytea\) does not exist
+}
+
 test quote-literal-plain {
     SELECT quote_literal('abc');
 }
@@ -378,6 +386,55 @@ test pg-input-error-info-date-bad-syntax {
 }
 expect {
     invalid input syntax for type date: "zzz"|22007
+}
+
+test pg-input-is-valid-null-argument-is-null {
+    SELECT CASE WHEN pg_input_is_valid('1', NULL) IS NULL THEN 'null' ELSE 'not null' END;
+    SELECT CASE WHEN pg_input_is_valid(NULL, 'int4') IS NULL THEN 'null' ELSE 'not null' END;
+}
+expect {
+    null
+    null
+}
+
+test pg-input-is-valid-bytea-type-name-errors {
+    SELECT pg_input_is_valid('1', '\x01'::bytea);
+}
+@sqlstate 42883
+expect error {}
+
+test pg-input-is-valid-bytea-input-errors {
+    SELECT pg_input_is_valid('\x01'::bytea, 'int4');
+}
+@sqlstate 42883
+expect error {}
+
+test to-char-null-format-is-null {
+    SELECT CASE WHEN to_char(1, NULL) IS NULL THEN 'null' ELSE 'not null' END;
+}
+expect {
+    null
+}
+
+test to-char-bytea-format-errors {
+    SELECT to_char(1, '\x01'::bytea);
+}
+@sqlstate 42883
+expect error {
+    function to_char\(integer, bytea\) does not exist
+}
+
+test text-functions-read-json-numbers-as-text {
+    SELECT pg_input_is_valid('{"a":12}'::json->>'a', 'int4');
+    SELECT pg_input_is_valid('{"a":true}'::jsonb->>'a', 'bool');
+    SELECT quote_ident('{"a":12}'::json->>'a');
+    SELECT '[' || to_char(5, '{"f":9}'::json->>'f') || ']';
+}
+expect {
+    t
+    t
+    "12"
+    [ 5]
 }
 
 test current-setting-numeric-parameter-name-errors {
