@@ -350,6 +350,16 @@ expect {
 }
 
 @requires strict "uses STRICT tables"
+test cmp-uuid-with-text-null-is-an-error {
+    -- A NULL cast to text is a text value, so it doesn't take the uuid's type.
+    CREATE TABLE t(id INTEGER PRIMARY KEY, u uuid) STRICT;
+    SELECT count(*) FROM t WHERE u = CAST(NULL AS TEXT);
+}
+expect error {
+    cannot compare type uuid with type text
+}
+
+@requires strict "uses STRICT tables"
 test cmp-numeric-arithmetic-results {
     -- n + i is a numeric, so max, IN and CASE compare it with numeric's order:
     -- as text '9.50' would sort after '10.50' and not equal 10.5. Every query
@@ -2046,7 +2056,7 @@ expect error {
 @requires strict "uses STRICT tables"
 test cmp-jsonb-with-jsonb-is-not-supported {
     -- Turso would compare the stored bytes, so objects with their keys in
-    -- another order would differ (#11911).
+    -- another order would differ.
     CREATE TABLE c(id INTEGER PRIMARY KEY, j jsonb) STRICT;
     INSERT INTO c VALUES (1, '{"a":1,"b":2}'), (2, '{"b":2,"a":1}');
     SELECT x.id, y.id FROM c x JOIN c y ON x.j = y.j;
@@ -2087,6 +2097,74 @@ expect error {
     cannot compare values of type jsonb
 }
 
+# UNION compares the rows of each SELECT with each other, so a NULL in the other
+# SELECT doesn't make the jsonb values comparable.
+@requires strict "uses STRICT tables"
+test cmp-union-of-jsonb-and-null-is-not-supported {
+    CREATE TABLE c(id INTEGER PRIMARY KEY, j jsonb) STRICT;
+    INSERT INTO c VALUES (1, '{"a":1,"b":2}'), (2, '{"b":2,"a":1}');
+    SELECT j FROM c UNION SELECT NULL;
+}
+expect error {
+    cannot compare values of type jsonb
+}
+
+@requires strict "uses STRICT tables"
+test cmp-union-of-null-and-jsonb-is-not-supported {
+    CREATE TABLE c(id INTEGER PRIMARY KEY, j jsonb) STRICT;
+    INSERT INTO c VALUES (1, '{"a":1,"b":2}'), (2, '{"b":2,"a":1}');
+    SELECT count(*) FROM (SELECT NULL UNION SELECT j FROM c);
+}
+expect error {
+    cannot compare values of type jsonb
+}
+
+@requires strict "uses STRICT tables"
+test cmp-union-all-of-jsonb-and-null-ordered-is-not-supported {
+    CREATE TABLE c(id INTEGER PRIMARY KEY, j jsonb) STRICT;
+    INSERT INTO c VALUES (1, '{"a":1,"b":2}'), (2, '{"b":2,"a":1}');
+    SELECT j FROM c UNION ALL SELECT NULL ORDER BY 1;
+}
+expect error {
+    cannot compare values of type jsonb
+}
+
+@requires strict "uses STRICT tables"
+test cmp-recursive-cte-union-of-null-and-jsonb-is-not-supported {
+    CREATE TABLE c(id INTEGER PRIMARY KEY, j jsonb) STRICT;
+    INSERT INTO c VALUES (1, '{"a":1,"b":2}'), (2, '{"b":2,"a":1}');
+    WITH RECURSIVE r(j) AS (SELECT NULL UNION SELECT j FROM c) SELECT count(*) FROM r;
+}
+expect error {
+    cannot compare values of type jsonb
+}
+
+@requires strict "uses STRICT tables"
+test cmp-recursive-cte-union-of-jsonb-is-not-supported {
+    CREATE TABLE c(id INTEGER PRIMARY KEY, j jsonb) STRICT;
+    INSERT INTO c VALUES (1, '{"a":1,"b":2}'), (2, '{"b":2,"a":1}');
+    WITH RECURSIVE r(j) AS (SELECT j FROM c UNION SELECT j FROM r) SELECT count(*) FROM r;
+}
+expect error {
+    cannot compare values of type jsonb
+}
+
+# UNION ALL in a recursive CTE keeps every row, so no jsonb values are compared.
+@requires strict "uses STRICT tables"
+test cmp-recursive-cte-union-all-of-jsonb {
+    CREATE TABLE c(id INTEGER PRIMARY KEY, j jsonb) STRICT;
+    INSERT INTO c VALUES (1, '{"a":1,"b":2}'), (2, '{"b":2,"a":1}');
+    WITH RECURSIVE r(j, n) AS (
+        SELECT j, 0 FROM c
+        UNION ALL
+        SELECT j, n + 1 FROM r WHERE n < 1
+    )
+    SELECT count(*) FROM r;
+}
+expect {
+    4
+}
+
 @requires strict "uses STRICT tables"
 test cmp-order-by-jsonb-is-not-supported {
     CREATE TABLE c(id INTEGER PRIMARY KEY, j jsonb) STRICT;
@@ -2103,6 +2181,26 @@ test cmp-unique-jsonb-is-not-supported {
 }
 expect error {
     cannot compare values of type jsonb
+}
+
+@requires strict "uses STRICT tables"
+test cmp-alter-unique-column-to-jsonb-is-not-supported {
+    CREATE TABLE c(id INTEGER PRIMARY KEY, j text, k int, UNIQUE(j, k)) STRICT;
+    ALTER TABLE c ALTER COLUMN j TO j jsonb;
+}
+expect error {
+    cannot compare values of type jsonb
+}
+
+@requires strict "uses STRICT tables"
+test cmp-alter-unique-column-to-date {
+    CREATE TABLE c(id INTEGER PRIMARY KEY, d text, k int, UNIQUE(d, k)) STRICT;
+    ALTER TABLE c ALTER COLUMN d TO d date;
+    INSERT INTO c VALUES (1, '2024-01-05', 1);
+    SELECT d FROM c;
+}
+expect {
+    2024-01-05
 }
 
 @requires strict "uses STRICT tables"
@@ -2207,6 +2305,59 @@ test cmp-index-on-inet-array-is-not-supported {
 }
 expect error {
     cannot compare values of type inet\[\]
+}
+
+# An array compares with an array whose elements compare with its elements.
+@requires strict "uses STRICT tables"
+test cmp-date-array-with-timestamp-array-is-not-supported {
+    -- PostgreSQL has no operator for date[] = timestamp[].
+    CREATE TABLE c(id INTEGER PRIMARY KEY, da date[], ta timestamp[]) STRICT;
+    INSERT INTO c VALUES (1, ARRAY['2024-01-05'], ARRAY['2024-01-05 00:00']);
+    SELECT id FROM c WHERE da = ta;
+}
+expect error {
+    cannot compare type date\[\] with type timestamp\[\]
+}
+
+@requires strict "uses STRICT tables"
+test cmp-integer-array-with-integer-is-not-supported {
+    CREATE TABLE c(id INTEGER PRIMARY KEY, ia integer[]) STRICT;
+    INSERT INTO c VALUES (1, ARRAY[5]);
+    SELECT id FROM c WHERE ia = 5;
+}
+expect error {
+    cannot compare type integer\[\] with type integer
+}
+
+@requires strict "uses STRICT tables"
+test cmp-timestamp-array-with-array-of-string-literals-is-not-supported {
+    -- The literals in ARRAY[...] are text, as in PostgreSQL.
+    CREATE TABLE c(id INTEGER PRIMARY KEY, ta timestamp[]) STRICT;
+    INSERT INTO c VALUES (1, ARRAY['2024-01-05 00:00']);
+    SELECT id FROM c WHERE ta = ARRAY['2024-01-05 00:00'];
+}
+expect error {
+    cannot compare type timestamp\[\] with type text\[\]
+}
+
+@requires strict "uses STRICT tables"
+test cmp-arrays-that-still-compare {
+    CREATE TABLE c(id INTEGER PRIMARY KEY, ia integer[], da date[], va varchar(5)[]) STRICT;
+    INSERT INTO c VALUES (1, ARRAY[5], ARRAY['2024-01-05'], ARRAY['x']), (2, NULL, NULL, NULL);
+    SELECT 'array', id FROM c WHERE ia = ARRAY[5];
+    SELECT 'literal', id FROM c WHERE da = '{2024-01-05}';
+    SELECT 'cast', id FROM c WHERE da = ARRAY[CAST('2024-01-05' AS date)];
+    SELECT 'same-type', count(*) FROM c x JOIN c y ON x.da = y.da;
+    SELECT 'varchar', id FROM c WHERE va = ARRAY['x'];
+    SELECT 'null', id FROM c WHERE ia IS NULL;
+}
+expect {
+    array|1
+    literal|1
+    cast|1
+    same-type|1
+    varchar|1
+    null|2
 }
 
 @requires strict "uses STRICT tables"

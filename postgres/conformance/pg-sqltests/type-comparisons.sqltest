@@ -185,8 +185,8 @@ expect @tursopg error {
     cannot compare type time with type integer
 }
 
-# tursopg casts to uuid as to text (#11475), so the cast keeps the uppercase
-# and never equals the stored uuid. The text is refused instead.
+# tursopg's cast to uuid gives text with the uppercase kept (#11475), which
+# would never equal the stored uuid, so comparing a uuid with it is refused.
 test compare-uuid-with-a-cast-to-uuid {
     CREATE TABLE u (id int, owner uuid);
     INSERT INTO u VALUES (1, 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11');

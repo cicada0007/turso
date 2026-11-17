@@ -624,7 +624,21 @@ pub fn compound_column_collation(
     column: usize,
     resolver: &Resolver,
 ) -> Result<CollationSeq> {
-    first_collation(compound_column_exprs(arms, column, resolver))
+    compound_collation(compound_column_exprs(arms, column, resolver))
+}
+
+/// The collation of a result column of a compound SELECT or a recursive CTE,
+/// where `exprs` is the column of each SELECT, by the rule of
+/// [first_collation]. Each SELECT gives many rows, whose values are compared
+/// with each other as a sort key's are. So `SELECT j FROM t UNION SELECT NULL`
+/// for a jsonb j is refused as `SELECT DISTINCT j FROM t` is.
+pub(crate) fn compound_collation<'a, 'c, 's: 'c>(
+    exprs: impl IntoIterator<Item = (&'a Expr, ExprContext<'c, 's>)> + Clone,
+) -> Result<CollationSeq> {
+    for column in exprs.clone() {
+        common_type_ordering([column])?;
+    }
+    first_collation(exprs)
 }
 
 /// Fails when the values of one result column, from each SELECT of a compound
@@ -798,25 +812,71 @@ fn common_ordering(
 /// comparison asks this one rule (scans, index seeks, IN, joins, nullif, and
 /// the values of CASE, coalesce, VALUES and a compound SELECT), as SQLite asks
 /// `sqlite3CompareAffinity` (expr.c). Each value is checked as the type it
-/// compares as (see [compared_type]). Only a built-in custom type limits what
-/// it compares with, so each one is paired with every other value.
+/// compares as (see [compared_type]). Only a built-in custom type and an array
+/// limit what they compare with, so each value is paired with every other one.
 pub(crate) fn check_types_compare(types: &[ExprType], schema: &Schema) -> Result<()> {
     let compared = types
         .iter()
         .map(|ty| compared_type(ty, schema))
         .collect::<Result<SmallVec<[ExprType; 2]>>>()?;
     for (i, ty) in compared.iter().enumerate() {
-        let ExprType::Custom { type_def, .. } = ty else {
-            continue;
-        };
         for j in (0..types.len()).filter(|&j| j != i) {
-            if !compares_with(type_def, &compared[j]) {
+            if !type_compares_with(ty, &compared[j], schema)? {
                 let (left, right) = (i.min(j), i.max(j));
                 return Err(cannot_compare(&types[left], &types[right]));
             }
         }
     }
     Ok(())
+}
+
+/// Whether a value of `ty` compares with a value of `other`, both types as
+/// [compared_type] gives them. An array compares with a string literal, a
+/// parameter, NULL, or an array whose elements compare with its elements, so
+/// `date[] = timestamp[]` and `integer[] = 5` are refused, as in PostgreSQL.
+/// A string literal in an array is not read as the other array's element type,
+/// so it is text: `timestamp_array = ARRAY['2024-01-05 00:00']` is refused.
+fn type_compares_with(ty: &ExprType, other: &ExprType, schema: &Schema) -> Result<bool> {
+    Ok(match ty {
+        ExprType::Custom { type_def, .. } => compares_with(type_def, other),
+        ExprType::Array { element, .. } => match other {
+            ExprType::Untyped | ExprType::Null => true,
+            // Checked again once the type is known, as in `a = (SELECT ...)`.
+            ExprType::NotKnownYet => true,
+            // A row value compared with one value is an error of its own.
+            ExprType::RowValue => true,
+            ExprType::Array {
+                element: other_element,
+                ..
+            } => type_compares_with(
+                &compared_element_type(element, schema)?,
+                &compared_element_type(other_element, schema)?,
+                schema,
+            )?,
+            ExprType::Custom { .. } | ExprType::Builtin(_) | ExprType::Unknown => false,
+        },
+        ExprType::Builtin(_)
+        | ExprType::Untyped
+        | ExprType::Null
+        | ExprType::Unknown
+        | ExprType::NotKnownYet
+        | ExprType::RowValue => true,
+    })
+}
+
+/// The type an array's elements of type `element` compare as: as
+/// [compared_type] gives it, and text for a string literal.
+fn compared_element_type(element: &ExprType, schema: &Schema) -> Result<ExprType> {
+    Ok(match element {
+        ExprType::Untyped => ExprType::Builtin(BuiltinType::Text),
+        ExprType::Custom { .. }
+        | ExprType::Array { .. }
+        | ExprType::Builtin(_)
+        | ExprType::Null
+        | ExprType::Unknown
+        | ExprType::NotKnownYet
+        | ExprType::RowValue => compared_type(element, schema)?,
+    })
 }
 
 /// The type values of `ty` compare as. A built-in type, such as date or
@@ -828,7 +888,7 @@ fn compared_type(ty: &ExprType, schema: &Schema) -> Result<ExprType> {
         return Ok(ty.clone());
     };
     Ok(match schema.without_domains(type_def)? {
-        // A STRUCT or UNION has no DECODE, so it compares as itself too.
+        // A STRUCT or UNION has no DECODE, so it compares as itself.
         Some(base) if base.is_builtin || base.is_struct() || base.is_union() => ExprType::Custom {
             type_def: base,
             params: Vec::new(),

@@ -1,7 +1,7 @@
 use crate::alloc::TursoVecExt;
 use crate::schema::{Index, IndexColumn, PseudoCursorType};
 use crate::sync::Arc;
-use crate::translate::collate::{first_collation, CollationSeq};
+use crate::translate::collate::{compound_collation, CollationSeq};
 use crate::translate::compound_select::{
     emit_program_for_compound_select, set_select_plan_destination,
 };
@@ -294,7 +294,7 @@ fn recursive_cte_result_column_collation(
             ));
         }
     }
-    first_collation(columns)
+    compound_collation(columns)
 }
 
 fn emit_recursive_cte_query(

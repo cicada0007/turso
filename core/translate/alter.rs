@@ -2121,8 +2121,7 @@ pub fn translate_alter_table(
                     }
                 }
                 table.resolve_custom_types(resolver.schema())?;
-                let column = &table.columns()[column_index];
-                check_column_collation(column, table.is_strict, resolver.schema())?;
+                table.check_collates_are_allowed(resolver.schema())?;
                 table.prepare_generated_columns()?;
                 let column_names: Vec<&str> = table
                     .columns()

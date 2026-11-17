@@ -384,7 +384,7 @@ expect {
 }
 
 # timestamp and timestamptz are two types. Comparing them needs a time zone
-# conversion, which isn't supported yet.
+# conversion, which Turso doesn't support.
 @requires strict "uses STRICT tables"
 test datetime-timestamp-equals-timestamptz-is-refused {
     CREATE TABLE t(id INTEGER, ts timestamp, tz timestamptz) STRICT;
