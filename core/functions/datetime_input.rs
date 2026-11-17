@@ -14,8 +14,9 @@ use crate::types::Value;
 use crate::{LimboError, Result, WallClockInstant};
 use chrono::{Datelike, Duration, Month, NaiveDate, NaiveDateTime, Timelike};
 
+/// The built-in date and time types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TemporalType {
+pub enum TemporalType {
     Date,
     Time,
     Timestamp,
@@ -23,6 +24,23 @@ enum TemporalType {
 }
 
 impl TemporalType {
+    /// The built-in type named `type_name`, if it is a date or time type.
+    pub fn from_name(type_name: &str) -> Option<Self> {
+        [Self::Date, Self::Time, Self::Timestamp, Self::Timestamptz]
+            .into_iter()
+            .find(|ty| ty.type_name() == type_name)
+    }
+
+    /// The name of the built-in type.
+    pub fn type_name(self) -> &'static str {
+        match self {
+            Self::Date => "date",
+            Self::Time => "time",
+            Self::Timestamp => "timestamp",
+            Self::Timestamptz => "timestamptz",
+        }
+    }
+
     /// The type's name in PostgreSQL's error messages.
     fn name(self) -> &'static str {
         match self {
@@ -40,16 +58,10 @@ const MICROS_PER_DAY: i64 = 86_400_000_000;
 /// NULL stays NULL, text is read as `type`, anything else is an error, as
 /// PostgreSQL has no conversion from numbers or bytes to dates.
 pub fn exec_temporal_encode(value: &Value, type_name: &Value) -> Result<Value> {
-    let ty = match type_name.to_text() {
-        Some("date") => TemporalType::Date,
-        Some("time") => TemporalType::Time,
-        Some("timestamp") => TemporalType::Timestamp,
-        Some("timestamptz") => TemporalType::Timestamptz,
-        _ => {
-            return Err(LimboError::InvalidArgument(format!(
-                "temporal_encode: unknown type {type_name}"
-            )))
-        }
+    let Some(ty) = type_name.to_text().and_then(TemporalType::from_name) else {
+        return Err(LimboError::InvalidArgument(format!(
+            "temporal_encode: unknown type {type_name}"
+        )));
     };
     let input = match value {
         Value::Null => return Ok(Value::Null),
@@ -62,7 +74,61 @@ pub fn exec_temporal_encode(value: &Value, type_name: &Value) -> Result<Value> {
         }
     };
     let fields = Fields::read(input, ty)?;
-    Ok(Value::build_text(fields.format(input, ty)?))
+    Ok(Value::build_text(fields.value(input, ty)?.to_text()))
+}
+
+/// A value of the built-in type date, time, timestamp or timestamptz.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Temporal {
+    Date(NaiveDate),
+    /// Microseconds since midnight, up to `24:00:00`.
+    Time(i64),
+    Timestamp(NaiveDateTime),
+    /// In UTC.
+    Timestamptz(NaiveDateTime),
+}
+
+impl Temporal {
+    /// Reads a value of type `ty` from the text it is stored as. Text in any
+    /// other form is an error, since its order would not be the order of the
+    /// values.
+    pub fn read_stored(text: &str, ty: TemporalType) -> Result<Self> {
+        let value = Fields::read(text, ty)?.value(text, ty)?;
+        if value.to_text() != text {
+            return Err(error(format!(
+                "\"{text}\" is not in the form {} values are stored in",
+                ty.name()
+            )));
+        }
+        Ok(value)
+    }
+
+    /// The value in its type's fixed text form, the form it is stored in.
+    /// Only years 1 to 9999 have one.
+    pub fn to_text(self) -> String {
+        match self {
+            Self::Date(date) => {
+                assert_storable_year(date.year());
+                date.format("%Y-%m-%d").to_string()
+            }
+            Self::Time(micros) => {
+                let mut out = String::new();
+                push_time(&mut out, micros);
+                out
+            }
+            Self::Timestamp(timestamp) | Self::Timestamptz(timestamp) => {
+                assert_storable_year(timestamp.year());
+                format_timestamp(timestamp)
+            }
+        }
+    }
+}
+
+fn assert_storable_year(year: i32) {
+    assert!(
+        (1..=9999).contains(&year),
+        "year {year} has no stored form; the code that made the value must refuse it"
+    );
 }
 
 /// A point in time as a `timestamptz` value, in the text the type stores, so
@@ -224,8 +290,8 @@ impl Fields {
         reader.finish()
     }
 
-    /// The value in `ty`'s fixed text form.
-    fn format(self, input: &str, ty: TemporalType) -> Result<String> {
+    /// The value of type `ty` the fields say.
+    fn value(self, input: &str, ty: TemporalType) -> Result<Temporal> {
         let date = match self.date {
             Some((year, month, day)) => {
                 Some(NaiveDate::from_ymd_opt(year, month, day).ok_or_else(|| range_error(input))?)
@@ -239,22 +305,22 @@ impl Fields {
             (None, TemporalType::Time) => return Err(syntax_error(input, ty)),
             (None, _) => 0,
         };
-        let (date, ty) = match (date, ty) {
-            (_, TemporalType::Time) => {
-                let mut out = String::new();
-                push_time(&mut out, time);
-                return Ok(out);
-            }
+        let date = match (date, ty) {
+            (_, TemporalType::Time) => return Ok(Temporal::Time(time)),
             (None, _) => return Err(syntax_error(input, ty)),
-            (Some(date), TemporalType::Date) => return Ok(date.format("%Y-%m-%d").to_string()),
-            (Some(date), ty) => (date, ty),
+            (Some(date), TemporalType::Date) => return Ok(Temporal::Date(date)),
+            (Some(date), TemporalType::Timestamp | TemporalType::Timestamptz) => date,
         };
         let mut timestamp = NaiveDateTime::from(date) + Duration::microseconds(time);
         if let (TemporalType::Timestamptz, Some(offset)) = (ty, self.offset) {
             timestamp -= Duration::seconds(offset);
         }
         check_year(timestamp.year(), input, ty)?;
-        Ok(format_timestamp(timestamp))
+        Ok(if ty == TemporalType::Timestamptz {
+            Temporal::Timestamptz(timestamp)
+        } else {
+            Temporal::Timestamp(timestamp)
+        })
     }
 }
 
