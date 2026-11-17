@@ -275,6 +275,15 @@ impl WhereTermOrigin {
             Self::Where | Self::Join(_) => None,
         }
     }
+
+    /// Whether the term passes an argument to a table-valued function, as
+    /// `hidden_column = +t.j` does for `json_each(t.j)`. It compares nothing.
+    pub fn passes_argument(self) -> bool {
+        match self {
+            Self::TableFunction(_) => true,
+            Self::Where | Self::Join(_) => false,
+        }
+    }
 }
 
 /// In a query plan, WHERE clause conditions and JOIN conditions are all folded into a vector of WhereTerm.
@@ -3186,7 +3195,7 @@ pub(super) fn query_output_columns(
 
     // Each column read from a VALUES list or a recursive CTE has one type, so
     // the values every row or SELECT gives it must have types that compare. A
-    // compound SELECT checks its columns when it is planned. An INSERT's
+    // compound SELECT checks its columns in compound_column_collation. An INSERT's
     // VALUES rows are not read as a table: each row is converted to the
     // target columns.
     let arms: alloc::Vec<&SelectPlan> = match plan {
