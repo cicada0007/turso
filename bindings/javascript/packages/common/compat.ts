@@ -157,14 +157,29 @@ class Database {
 
     const db = this;
     const wrapTxn = (mode) => {
-      return (...bindParameters) => {
-        db.exec("BEGIN " + mode);
+      return function (...bindParameters) {
+        // As in better-sqlite3, a call made inside an open transaction runs
+        // as a savepoint, so a failure undoes only the work of that call.
+        const nested = db.inTransaction;
+        db.exec(nested ? "SAVEPOINT turso_compat_txn" : "BEGIN " + mode);
         try {
-          const result = fn(...bindParameters);
-          db.exec("COMMIT");
+          const result = fn.apply(this, bindParameters);
+          if (result && typeof result.then === "function") {
+            throw new TypeError("Transaction function cannot return a promise");
+          }
+          db.exec(nested ? "RELEASE turso_compat_txn" : "COMMIT");
           return result;
         } catch (err) {
-          db.exec("ROLLBACK");
+          // The transaction may be gone already, for example when `fn` ran
+          // COMMIT or ROLLBACK itself; rolling back again would hide `err`.
+          if (db.inTransaction) {
+            if (nested) {
+              db.exec("ROLLBACK TO turso_compat_txn");
+              db.exec("RELEASE turso_compat_txn");
+            } else {
+              db.exec("ROLLBACK");
+            }
+          }
           throw err;
         }
       };
