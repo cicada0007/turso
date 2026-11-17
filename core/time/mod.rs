@@ -143,7 +143,7 @@ pub enum TimeError {
 
 type Result<T> = core::result::Result<T, TimeError>;
 
-#[scalar(name = "time_now", alias = "now")]
+#[scalar(name = "time_now")]
 fn time_now(args: &[Value]) -> Value {
     if !args.is_empty() {
         return Value::error(ResultCode::InvalidArgs);
