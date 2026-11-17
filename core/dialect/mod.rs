@@ -171,7 +171,7 @@ impl ScalarFuncContext<'_> {
         if let Some(times) = self.statement_times.get() {
             return times;
         }
-        let times = StatementTimes::new(self.io.current_time_wall_clock(), self.connection);
+        let times = StatementTimes::new(self.clock.current_time_wall_clock(), self.connection);
         self.statement_times.set(Some(times));
         times
     }

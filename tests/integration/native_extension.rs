@@ -306,6 +306,28 @@ fn native_scalar_preserves_unmatched_outer_join_rows() {
     assert_eq!(rows, vec![vec![Value::from_i64(2)]]);
 }
 
+/// `now()` and `'now'` read the statement's clock, so they agree even when time
+/// passes between the two calls.
+#[test]
+fn now_reads_the_same_clock_as_sqlite_now() {
+    let conn = connection(
+        OpenOptions::new(Arc::new(SqliteDialect)).extension_function(
+            ExternalFunc::new_native_scalar("pause".into(), FunctionArity::Exact(0), false, Pause)
+                .unwrap(),
+        ),
+    );
+    let rows = conn
+        .prepare(
+            "SELECT strftime('%Y-%m-%d %H:%M:%f', 'now'), pause(), \
+             strftime('%Y-%m-%d %H:%M:%f', now())",
+        )
+        .unwrap()
+        .run_collect_rows()
+        .unwrap();
+    let [row] = <[Vec<Value>; 1]>::try_from(rows).unwrap();
+    assert_eq!(row[0], row[2], "'now' and now() differ: {row:?}");
+}
+
 #[test]
 fn native_scalar_helper_queries_resume_with_independent_call_state() {
     let queue = Arc::new(Mutex::new(Vec::new()));
@@ -665,6 +687,27 @@ impl ScalarCall for NullToNineCall {
             Value::Null => Value::from_i64(9),
             value => value.clone(),
         }))
+    }
+}
+
+/// Sleeps long enough for a millisecond clock to move.
+#[derive(Debug, Clone, Copy)]
+struct Pause;
+
+impl ScalarFunction for Pause {
+    type Call = Self;
+
+    fn create_call(&self) -> Result<Self::Call> {
+        Ok(*self)
+    }
+}
+
+impl ScalarCall for Pause {
+    type Output = i64;
+
+    fn step(&mut self, _connection: &Arc<Connection>, _args: &[Register]) -> IOResultOr<i64> {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        Ok(IOResult::Done(0))
     }
 }
 
