@@ -234,14 +234,20 @@ fn pragma_vtabs() -> Vec<Arc<VirtualTable>> {
 /// surface regardless of the frontend dialect.
 pub fn resolve_builtin_function(name: &str, arg_count: usize) -> crate::Result<Option<Func>> {
     let func = resolve_builtin_function_name(name, arg_count)?;
-    // Reject scalar calls whose argument count is not in `arities()`.
     if let Some(Func::Scalar(srf)) = &func {
-        let arities = srf.arities();
-        if !arities.contains(&-1) && !arities.contains(&(arg_count as i32)) {
-            crate::bail_parse_error!("wrong number of arguments to function {}()", name)
-        }
+        check_scalar_arity(srf, name, arg_count)?;
     }
     Ok(func)
+}
+
+/// Rejects a call of `func` under `name` whose argument count is not in
+/// `arities()`.
+pub fn check_scalar_arity(func: &ScalarFunc, name: &str, arg_count: usize) -> crate::Result<()> {
+    let arities = func.arities();
+    if !arities.contains(&-1) && !arities.contains(&(arg_count as i32)) {
+        crate::bail_parse_error!("wrong number of arguments to function {}()", name)
+    }
+    Ok(())
 }
 
 /// Resolves a built-in function by name without checking the argument count

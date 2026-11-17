@@ -18,7 +18,7 @@ use turso_core::{
     },
     security::roles::RoleId,
     walk_expr_mut, Connection, Dialect, Func, IOResult, LimboError, NamespaceId, NamespaceRef,
-    OpenOptions, Result, Statement, Value, WalkControl, MAIN_DB_ID,
+    OpenOptions, Result, ScalarFunc, Statement, Value, WalkControl, MAIN_DB_ID,
 };
 use turso_ext::{ConstraintInfo, IndexInfo, OrderByInfo, ResultCode, VTabKind};
 use turso_parser::ast::{self, RefAct, SortOrder};
@@ -233,7 +233,8 @@ impl Dialect for PostgresDialect {
         }
         // CURRENT_TIMESTAMP and the other time keywords read now().
         if turso_pg_parser::translator::is_time_keyword_function(name) {
-            return turso_core::dialect::engine::resolve_builtin_function("now", arg_count);
+            turso_core::dialect::engine::check_scalar_arity(&ScalarFunc::Now, name, arg_count)?;
+            return Ok(Some(Func::Scalar(ScalarFunc::Now)));
         }
         turso_core::dialect::engine::resolve_builtin_function(name, arg_count)
     }
