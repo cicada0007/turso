@@ -1727,6 +1727,38 @@ expect {
     1|1|1
 }
 
+test pg-get-expr-shows-time-keyword-defaults-as-written {
+    CREATE TABLE keyword_defaults (a date DEFAULT CURRENT_DATE,
+                                   b timestamptz DEFAULT CURRENT_TIMESTAMP,
+                                   c timestamp DEFAULT LOCALTIMESTAMP,
+                                   d time DEFAULT LOCALTIME);
+    SELECT pg_get_expr(d.adbin, d.adrelid)
+    FROM pg_attrdef d JOIN pg_class c ON c.oid = d.adrelid
+    WHERE c.relname = 'keyword_defaults'
+    ORDER BY d.adnum;
+}
+expect {
+    CURRENT_DATE
+    CURRENT_TIMESTAMP
+    LOCALTIMESTAMP
+    LOCALTIME
+}
+
+# tursopg stores CURRENT_TIMESTAMP as a call to current_timestamp_keyword()
+# and CURRENT_DATE as current_date_keyword() cast to date. PostgreSQL has no
+# such functions.
+test current-timestamp-keyword-function-is-not-callable {
+    SELECT current_timestamp_keyword();
+}
+@sqlstate 42883
+expect error {}
+
+test current-date-keyword-function-is-not-callable {
+    SELECT current_date_keyword();
+}
+@sqlstate 42883
+expect error {}
+
 # PostgreSQL returns the time of day with its zone. tursopg refuses
 # CURRENT_TIME because it has no `time with time zone` type.
 test current-time-is-not-supported {

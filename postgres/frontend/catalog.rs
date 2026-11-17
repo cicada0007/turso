@@ -217,17 +217,23 @@ impl Dialect for PostgresDialect {
             return Ok(None);
         }
         // PostgreSQL's clock functions besides now(), which the engine has for
-        // both dialects.
-        let clock_functions = [
-            ("transaction_timestamp", ScalarFunc::Now),
-            ("statement_timestamp", ScalarFunc::StatementTimestamp),
-            ("clock_timestamp", ScalarFunc::ClockTimestamp),
-        ];
-        for (clock_name, func) in clock_functions {
-            if name.eq_ignore_ascii_case(clock_name) {
-                turso_core::dialect::engine::check_scalar_arity(&func, name, arg_count)?;
-                return Ok(Some(Func::Scalar(func)));
-            }
+        // both dialects. CURRENT_TIMESTAMP and the other time keywords read
+        // now().
+        let clock_function = if turso_pg_parser::translator::is_time_keyword_function(name) {
+            Some(ScalarFunc::Now)
+        } else {
+            [
+                ("transaction_timestamp", ScalarFunc::Now),
+                ("statement_timestamp", ScalarFunc::StatementTimestamp),
+                ("clock_timestamp", ScalarFunc::ClockTimestamp),
+            ]
+            .into_iter()
+            .find(|(clock_name, _)| name.eq_ignore_ascii_case(clock_name))
+            .map(|(_, func)| func)
+        };
+        if let Some(func) = clock_function {
+            turso_core::dialect::engine::check_scalar_arity(&func, name, arg_count)?;
+            return Ok(Some(Func::Scalar(func)));
         }
         turso_core::dialect::engine::resolve_builtin_function(name, arg_count)
     }
@@ -4068,7 +4074,11 @@ fn constraint_column_list<'a>(
 fn render_expr(expr: &ast::Expr) -> String {
     let mut expr = expr.clone();
     walk_expr_mut(&mut expr, &mut |expr| {
-        if let ast::Expr::FunctionCall { name, args, .. } = expr {
+        if let Some(keyword) = turso_pg_parser::translator::time_keyword_written_as(expr) {
+            // A keyword literal prints as written; a name would print
+            // CURRENT_DATE quoted, since it is a keyword in SQLite too.
+            *expr = ast::Expr::Literal(ast::Literal::Keyword(keyword.to_string()));
+        } else if let ast::Expr::FunctionCall { name, args, .. } = expr {
             if args.is_empty() {
                 if let Some(keyword) = turso_pg_parser::translator::role_keyword(name.as_str()) {
                     *expr = ast::Expr::Id(ast::Name::from_string(keyword));
@@ -4086,7 +4096,7 @@ fn render_expr(expr: &ast::Expr) -> String {
         }
         Ok(WalkControl::Continue)
     })
-    .expect("rewriting role functions does not fail");
+    .expect("rewriting keyword functions does not fail");
     expr.to_string()
 }
 

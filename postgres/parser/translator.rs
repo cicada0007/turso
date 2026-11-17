@@ -3538,15 +3538,17 @@ impl PostgreSQLTranslator {
             }
             Some(pg_query::protobuf::node::Node::SqlvalueFunction(svf)) => {
                 use pg_query::protobuf::SqlValueFunctionOp;
-                // PostgreSQL defines these keywords by now(), the time the
-                // transaction began, in the session's time zone, UTC.
                 match SqlValueFunctionOp::try_from(svf.op) {
                     Ok(SqlValueFunctionOp::SvfopCurrentTimestamp) => {
-                        Ok(function_call("now", vec![]))
+                        Ok(time_keyword_expr("CURRENT_TIMESTAMP"))
                     }
-                    Ok(SqlValueFunctionOp::SvfopCurrentDate) => Ok(cast_of_now("date")),
-                    Ok(SqlValueFunctionOp::SvfopLocaltimestamp) => Ok(cast_of_now("timestamp")),
-                    Ok(SqlValueFunctionOp::SvfopLocaltime) => Ok(cast_of_now("time")),
+                    Ok(SqlValueFunctionOp::SvfopCurrentDate) => {
+                        Ok(time_keyword_expr("CURRENT_DATE"))
+                    }
+                    Ok(SqlValueFunctionOp::SvfopLocaltimestamp) => {
+                        Ok(time_keyword_expr("LOCALTIMESTAMP"))
+                    }
+                    Ok(SqlValueFunctionOp::SvfopLocaltime) => Ok(time_keyword_expr("LOCALTIME")),
                     // A precision rounds the time: `CURRENT_TIMESTAMP(0)` is in whole seconds.
                     Ok(
                         SqlValueFunctionOp::SvfopCurrentTimestampN
@@ -8807,16 +8809,109 @@ fn deparse_default_expr(node: &pg_query::protobuf::Node) -> Option<String> {
     }
 }
 
-/// `CAST(now() AS type_name)`.
-fn cast_of_now(pg_type: &str) -> ast::Expr {
-    ast::Expr::Cast {
-        expr: Box::new(function_call("now", vec![])),
-        type_name: Some(ast::Type {
-            name: cast_type_name(pg_type).to_string(),
-            size: None,
-            array_dimensions: 0,
-        }),
+/// A time keyword and the function it is stored as.
+///
+/// PostgreSQL defines each keyword by now(), the time the transaction began;
+/// a keyword of another type than timestamptz is that time cast to its type.
+/// Each keyword has a function of its own, so that the catalogs can show the
+/// keyword that was written instead of `now()`. PostgreSQL has no functions
+/// of these names, so user SQL cannot call them.
+struct TimeKeyword {
+    keyword: &'static str,
+    function: &'static str,
+    cast_to: Option<&'static str>,
+}
+
+const TIME_KEYWORDS: [TimeKeyword; 4] = [
+    TimeKeyword {
+        keyword: "CURRENT_TIMESTAMP",
+        function: "current_timestamp_keyword",
+        cast_to: None,
+    },
+    TimeKeyword {
+        keyword: "CURRENT_DATE",
+        function: "current_date_keyword",
+        cast_to: Some("date"),
+    },
+    TimeKeyword {
+        keyword: "LOCALTIMESTAMP",
+        function: "localtimestamp_keyword",
+        cast_to: Some("timestamp"),
+    },
+    TimeKeyword {
+        keyword: "LOCALTIME",
+        function: "localtime_keyword",
+        cast_to: Some("time"),
+    },
+];
+
+/// The expression that the time keyword `keyword` is stored as:
+/// `current_date_keyword()` cast to `date` for `CURRENT_DATE`.
+fn time_keyword_expr(keyword: &str) -> ast::Expr {
+    let time_keyword = TIME_KEYWORDS
+        .iter()
+        .find(|time_keyword| time_keyword.keyword == keyword)
+        .unwrap_or_else(|| panic!("{keyword} is not a time keyword"));
+    let call = function_call(time_keyword.function, vec![]);
+    match time_keyword.cast_to {
+        None => call,
+        Some(type_name) => ast::Expr::Cast {
+            expr: Box::new(call),
+            type_name: Some(ast::Type {
+                name: type_name.to_string(),
+                size: None,
+                array_dimensions: 0,
+            }),
+        },
     }
+}
+
+/// Whether `function_name` is a function that a time keyword is stored as.
+pub fn is_time_keyword_function(function_name: &str) -> bool {
+    TIME_KEYWORDS
+        .iter()
+        .any(|time_keyword| time_keyword.function.eq_ignore_ascii_case(function_name))
+}
+
+/// The time keyword that `expr` was written as, when `expr` is the
+/// expression that [`time_keyword_expr`] stores for it. A cast of
+/// `CURRENT_TIMESTAMP` that the user wrote, `CURRENT_TIMESTAMP::date`, is
+/// not a keyword; its operand is.
+pub fn time_keyword_written_as(expr: &ast::Expr) -> Option<&'static str> {
+    match expr {
+        ast::Expr::Cast {
+            expr: operand,
+            type_name: Some(type_name),
+        } => {
+            let time_keyword = time_keyword_called_by(operand)?;
+            (time_keyword.cast_to == Some(type_name.name.as_str())).then_some(time_keyword.keyword)
+        }
+        expr => {
+            let time_keyword = time_keyword_called_by(expr)?;
+            assert!(
+                time_keyword.cast_to.is_none(),
+                "{}() is stored only cast to {:?}",
+                time_keyword.function,
+                time_keyword.cast_to,
+            );
+            Some(time_keyword.keyword)
+        }
+    }
+}
+
+fn time_keyword_called_by(expr: &ast::Expr) -> Option<&'static TimeKeyword> {
+    let ast::Expr::FunctionCall { name, args, .. } = expr else {
+        return None;
+    };
+    let time_keyword = TIME_KEYWORDS
+        .iter()
+        .find(|time_keyword| time_keyword.function.eq_ignore_ascii_case(name.as_str()))?;
+    assert!(
+        args.is_empty(),
+        "{}() is stored without arguments",
+        time_keyword.function
+    );
+    Some(time_keyword)
 }
 
 fn function_call(name: &str, args: Vec<ast::Expr>) -> ast::Expr {
@@ -9355,6 +9450,7 @@ fn function_name(names: &[pg_query::protobuf::Node]) -> Result<String, ParseErro
     // matches function names without regard to case.
     if name.bytes().any(|b| b.is_ascii_uppercase())
         || FUNCTIONS_ONLY_THE_TRANSLATOR_CALLS.contains(&name.as_str())
+        || is_time_keyword_function(&name)
     {
         return Err(ParseError::Sqlstate {
             sqlstate: SQLSTATE_UNDEFINED_FUNCTION,
@@ -11068,16 +11164,28 @@ mod tests {
     }
 
     #[test]
-    fn test_current_timestamp_translation() {
-        // PostgreSQL defines each keyword by now(), so each translates the
-        // same as the cast written out.
-        let keywords = selected_expressions(
-            "SELECT CURRENT_TIMESTAMP, CURRENT_DATE, LOCALTIMESTAMP, LOCALTIME FROM t",
+    fn time_keywords_are_told_apart_from_now_and_casts() {
+        let expressions = selected_expressions(
+            "SELECT CURRENT_TIMESTAMP, CURRENT_DATE, LOCALTIMESTAMP, LOCALTIME, \
+                    now(), now()::date, CURRENT_TIMESTAMP::date FROM t",
         );
-        let casts = selected_expressions(
-            "SELECT now(), CAST(now() AS date), CAST(now() AS timestamp), CAST(now() AS time) FROM t",
+        let written_as: Vec<_> = expressions.iter().map(time_keyword_written_as).collect();
+        assert_eq!(
+            written_as,
+            [
+                Some("CURRENT_TIMESTAMP"),
+                Some("CURRENT_DATE"),
+                Some("LOCALTIMESTAMP"),
+                Some("LOCALTIME"),
+                None,
+                None,
+                None,
+            ]
         );
-        assert_eq!(keywords, casts);
+        let ast::Expr::Cast { expr: operand, .. } = &expressions[6] else {
+            panic!("CURRENT_TIMESTAMP::date: expected a cast");
+        };
+        assert_eq!(time_keyword_written_as(operand), Some("CURRENT_TIMESTAMP"));
     }
 
     fn selected_expressions(sql: &str) -> Vec<ast::Expr> {
