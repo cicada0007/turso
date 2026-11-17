@@ -8,7 +8,7 @@ use turso_ext::{
 };
 
 use crate::translate::collate::{CollationSeq, TextCollation};
-use crate::LimboError;
+use crate::{turso_assert, LimboError};
 
 pub type ContextCollationFunction = unsafe extern "C" fn(
     context: usize,
@@ -2075,32 +2075,34 @@ impl Func {
     pub fn builtin_function_list(
         dialect: &dyn crate::Dialect,
     ) -> Result<Vec<FunctionListEntry>, LimboError> {
-        let dialect_names = dialect.function_names().iter().flat_map(|(name, func)| {
-            func.arities().iter().map(|&narg| FunctionListEntry {
-                name: name.to_string(),
-                func_type: "s",
-                narg,
-                deterministic: func.is_deterministic(),
-            })
-        });
         let mut listed: Vec<FunctionListEntry> = Vec::new();
-        for entry in Self::engine_function_list()
-            .into_iter()
-            .chain(dialect_names)
-        {
-            let arg_count = match entry.narg {
-                // Every function that takes any number of arguments takes
-                // two: concat_ws() needs two, and max() and min() with fewer
-                // are the aggregates.
-                -1 => 2,
-                narg => usize::try_from(narg).expect("a function's narg is -1 or a count"),
-            };
-            // A dialect's own name can also be an engine name, as
-            // statement_timestamp is in PostgreSQL.
-            if dialect.resolve_function(&entry.name, arg_count)?.is_some()
-                && !listed.contains(&entry)
+        for entry in Self::engine_function_list() {
+            if dialect
+                .resolve_function(&entry.name, entry.probe_arg_count())?
+                .is_some()
             {
                 listed.push(entry);
+            }
+        }
+        for (name, func) in dialect.function_names() {
+            for &narg in func.arities() {
+                let entry = FunctionListEntry {
+                    name: name.to_string(),
+                    func_type: "s",
+                    narg,
+                    deterministic: func.is_deterministic(),
+                };
+                let resolved = dialect.resolve_function(name, entry.probe_arg_count())?;
+                turso_assert!(
+                    resolved.is_some(),
+                    "a dialect resolves every name in its function_names",
+                    { "name": name, "narg": narg }
+                );
+                // A dialect's own name can also be an engine name, as
+                // statement_timestamp is in PostgreSQL.
+                if !listed.contains(&entry) {
+                    listed.push(entry);
+                }
             }
         }
         Ok(listed)
@@ -2197,4 +2199,62 @@ pub struct FunctionListEntry {
     pub func_type: &'static str, // "s" = scalar, "a" = aggregate, "w" = window
     pub narg: i32,               // -1 = variable
     pub deterministic: bool,
+}
+
+impl FunctionListEntry {
+    /// The argument count a call of this entry is resolved with to decide
+    /// whether a dialect can call it. Every function that takes any number of
+    /// arguments takes two: concat_ws() needs two, and max() and min() with
+    /// fewer are the aggregates.
+    fn probe_arg_count(&self) -> usize {
+        match self.narg {
+            -1 => 2,
+            narg => usize::try_from(narg).expect("a function's narg is -1 or a count"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The function list leaves out an entry the dialect doesn't resolve.
+    /// For a function that takes any number of arguments, that is right only
+    /// if the engine resolves it with the two arguments the list tries.
+    #[test]
+    fn every_variadic_engine_function_resolves_with_two_arguments() {
+        let variadic: Vec<String> = Func::engine_function_list()
+            .into_iter()
+            .filter(|entry| entry.narg == -1)
+            .map(|entry| entry.name)
+            .collect();
+        assert!(variadic.iter().any(|name| name == "concat_ws"));
+        let unresolved: Vec<&String> = variadic
+            .iter()
+            .filter(|name| {
+                crate::dialect::engine::resolve_builtin_function(name, 2)
+                    .expect("a variadic function accepts two arguments")
+                    .is_none()
+            })
+            .collect();
+        assert!(unresolved.is_empty(), "not resolved: {unresolved:?}");
+    }
+
+    struct NamesWhatItDoesNotResolve;
+
+    impl crate::Dialect for NamesWhatItDoesNotResolve {
+        fn name(&self) -> &'static str {
+            "names what it does not resolve"
+        }
+
+        fn function_names(&self) -> &'static [(&'static str, ScalarFunc)] {
+            &[("not_a_function", ScalarFunc::Now)]
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "a dialect resolves every name in its function_names")]
+    fn a_dialect_name_that_does_not_resolve_panics() {
+        Func::builtin_function_list(&NamesWhatItDoesNotResolve).unwrap();
+    }
 }
