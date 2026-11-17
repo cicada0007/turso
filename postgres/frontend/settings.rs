@@ -601,7 +601,9 @@ pub(crate) enum Accepts {
     Bool(bool),
     /// The ISO output style and the MDY input order.
     DateStyle,
-    /// A name of the UTF8 encoding.
+    /// A name of UTF8 or SQL_ASCII. With a UTF8 server PostgreSQL converts
+    /// neither: it checks that text from an SQL_ASCII client is valid UTF8
+    /// and sends UTF8 text back, as tursopg does for every client.
     ClientEncoding,
     /// 1, 2 or 3. For each of them PostgreSQL 12 and later print the
     /// shortest text that reads back as the same float, as tursopg does.
@@ -646,7 +648,14 @@ impl Accepts {
                     .filter(char::is_ascii_alphanumeric)
                     .map(|c| c.to_ascii_lowercase())
                     .collect();
-                matches!(name.as_str(), "utf8" | "unicode").then_some(default)
+                match name.as_str() {
+                    // PostgreSQL keeps this one spelling, which old JDBC
+                    // drivers expect to read back unchanged.
+                    "unicode" if value == "UNICODE" => Some("UNICODE"),
+                    "utf8" | "unicode" => Some("UTF8"),
+                    "sqlascii" => Some("SQL_ASCII"),
+                    _ => None,
+                }
             }
             Self::FloatDigits => matches!(value, "1" | "2" | "3").then_some(value),
             Self::Utc => ["UTC", "Etc/UTC"]
@@ -660,11 +669,10 @@ impl Accepts {
 
     fn supported(&self, default: &str) -> String {
         match self {
-            Self::DefaultAnyCase
-            | Self::Default
-            | Self::Bool(_)
-            | Self::DateStyle
-            | Self::ClientEncoding => format!("\"{default}\""),
+            Self::DefaultAnyCase | Self::Default | Self::Bool(_) | Self::DateStyle => {
+                format!("\"{default}\"")
+            }
+            Self::ClientEncoding => "\"UTF8\", \"SQL_ASCII\"".to_owned(),
             Self::FloatDigits => "\"1\", \"2\", \"3\"".to_owned(),
             Self::Utc => "\"UTC\", \"Etc/UTC\"".to_owned(),
             Self::PrintableAscii => "printable ASCII text of at most 63 bytes".to_owned(),

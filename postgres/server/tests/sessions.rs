@@ -149,6 +149,18 @@ fn startup_accepts_spellings_of_supported_values() {
     }
 }
 
+/// With a UTF8 server PostgreSQL converts no text for an SQL_ASCII client.
+#[test]
+fn sql_ascii_client_sends_and_receives_utf8_text() {
+    let server = TestServer::start();
+    let mut client = server
+        .connect_with(&[("client_encoding", "SQL_ASCII")])
+        .unwrap();
+    assert_eq!(query(&mut client, "SHOW client_encoding"), ["SQL_ASCII"]);
+    assert_eq!(query(&mut client, "SELECT 'é'")[0].as_bytes(), [0xC3, 0xA9]);
+    assert_eq!(query(&mut client, "SELECT octet_length('é')"), ["2"]);
+}
+
 #[test]
 fn startup_reports_parameter_values() {
     let server = TestServer::start();

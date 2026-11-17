@@ -408,7 +408,7 @@ expect {
 }
 @sqlstate 0A000
 expect @tursopg error {
-    parameter "client_encoding" does not support value "LATIN1"; supported: "UTF8"
+    parameter "client_encoding" does not support value "LATIN1"; supported: "UTF8", "SQL_ASCII"
 }
 
 test set-config-client-encoding-name-longer-than-63-bytes {
@@ -420,7 +420,7 @@ expect error {
 }
 @sqlstate 0A000
 expect @tursopg error {
-    parameter "client_encoding" does not support value "u-{70}tf8"; supported: "UTF8"
+    parameter "client_encoding" does not support value "u-{70}tf8"; supported: "UTF8", "SQL_ASCII"
 }
 
 test set-accepts-spellings-of-supported-values {
@@ -428,7 +428,9 @@ test set-accepts-spellings-of-supported-values {
     SHOW TimeZone;
     SET DateStyle = US, iso;
     SHOW DateStyle;
-    SET client_encoding = 'unicode';
+    SET client_encoding = 'UNICODE';
+    SHOW client_encoding;
+    SET client_encoding = 'sql-ascii';
     SHOW client_encoding;
     SET extra_float_digits = 3;
     SHOW extra_float_digits;
@@ -436,7 +438,8 @@ test set-accepts-spellings-of-supported-values {
 expect {
     UTC
     ISO, MDY
-    UTF8
+    UNICODE
+    SQL_ASCII
     3
 }
 

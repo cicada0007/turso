@@ -87,7 +87,7 @@ SQLSTATE `0A000`:
 | `TimeZone` | `Etc/UTC` | `UTC`; case insensitive |
 | `DateStyle` | `ISO, MDY` | `ISO`, `MDY`, both in either order, and `US`, `NONEURO`, `NONEUROPEAN` for `MDY`; case insensitive |
 | `IntervalStyle` | `postgres` | Case insensitive |
-| `client_encoding` | `UTF8` | `UTF-8`, `UNICODE`; case insensitive, punctuation ignored |
+| `client_encoding` | `UTF8` | `UTF-8`, `UNICODE`; `SQL_ASCII`, which sends and receives UTF-8 text as `UTF8` does; case insensitive, punctuation ignored |
 | `standard_conforming_strings` | `on` | PostgreSQL true spellings |
 | `extra_float_digits` | `1` | `2`, `3` (the same shortest-precise output mode) |
 | `statement_timeout`, `lock_timeout`, `idle_in_transaction_session_timeout`, `transaction_timeout` | `0` | None; timeouts are disabled |
