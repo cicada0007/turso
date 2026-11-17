@@ -2148,6 +2148,17 @@ expect error {
     cannot compare values of type jsonb
 }
 
+# UNION ALL without ORDER BY keeps every row, so no jsonb values are compared.
+@requires strict "uses STRICT tables"
+test cmp-union-all-of-jsonb-and-null {
+    CREATE TABLE c(id INTEGER PRIMARY KEY, j jsonb) STRICT;
+    INSERT INTO c VALUES (1, '{"a":1,"b":2}'), (2, '{"b":2,"a":1}');
+    SELECT count(*) FROM (SELECT j FROM c UNION ALL SELECT NULL);
+}
+expect {
+    3
+}
+
 @requires strict "uses STRICT tables"
 test cmp-union-all-of-jsonb-and-null-ordered-is-not-supported {
     CREATE TABLE c(id INTEGER PRIMARY KEY, j jsonb) STRICT;

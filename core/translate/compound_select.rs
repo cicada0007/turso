@@ -153,12 +153,12 @@ pub fn emit_program_for_compound_select(
 
     let real_query_destination = right_most.query_destination.clone();
     let num_result_cols = right_most.result_columns.len();
-    let collations = compound_collations(left, right_most, has_order_by, resolver)?;
+    let collations = compound_collations(left, right_most, resolver)?;
 
     // When ORDER BY is present, redirect compound output to a collection index,
     // then sort and emit to the real destination afterwards.
     let (query_destination, collection_cursor, collection_index) = if has_order_by {
-        let (cursor_id, index) = create_collection_index(program, right_most, &collations)?;
+        let (cursor_id, index) = create_collection_index(program, right_most, collations.get()?)?;
         let dest = QueryDestination::EphemeralIndex {
             cursor_id,
             index: index.clone(),
@@ -282,7 +282,7 @@ fn emit_compound_select(
     limit: &Option<Box<Expr>>,
     offset: &Option<Box<Expr>>,
     resolver: &Resolver,
-    collations: &[CollationSeq],
+    compound_collations: &CompoundCollations,
     limit_ctx: Option<LimitCtx>,
     offset_reg: Option<usize>,
     reg_result_cols_start: Option<usize>,
@@ -321,7 +321,7 @@ fn emit_compound_select(
                     limit,
                     offset,
                     resolver,
-                    collations,
+                    compound_collations,
                     limit_ctx,
                     offset_reg,
                     reg_result_cols_start,
@@ -357,6 +357,7 @@ fn emit_compound_select(
                 program.preassign_label_to_next_insn(label_next_select);
             }
             CompoundOperator::Union => {
+                let collations = compound_collations.get()?;
                 let union_destination = right_most.query_destination.clone();
                 let affinity_str = match &union_destination {
                     QueryDestination::EphemeralIndex { affinity_str, .. } => affinity_str.clone(),
@@ -381,7 +382,7 @@ fn emit_compound_select(
                     limit,
                     offset,
                     resolver,
-                    collations,
+                    compound_collations,
                     None,
                     None,
                     reg_result_cols_start,
@@ -424,6 +425,7 @@ fn emit_compound_select(
                 // sets right_most.query_destination to its dedupe_index. We need to capture
                 // this BEFORE we overwrite it with our own indexes for the intersection.
                 let intersect_destination = right_most.query_destination.clone();
+                let collations = compound_collations.get()?;
 
                 let (left_cursor_id, left_index) =
                     create_dedupe_index(program, right_most, collations)?;
@@ -449,7 +451,7 @@ fn emit_compound_select(
                     limit,
                     offset,
                     resolver,
-                    collations,
+                    compound_collations,
                     None,
                     None,
                     reg_result_cols_start,
@@ -479,6 +481,7 @@ fn emit_compound_select(
                 )?;
             }
             CompoundOperator::Except => {
+                let collations = compound_collations.get()?;
                 let except_destination = right_most.query_destination.clone();
                 let reused_index = destination_index_for_dedupe(&except_destination, collations);
                 let new_index = reused_index.is_none();
@@ -499,7 +502,7 @@ fn emit_compound_select(
                     limit,
                     offset,
                     resolver,
-                    collations,
+                    compound_collations,
                     None,
                     None,
                     reg_result_cols_start,
@@ -830,15 +833,12 @@ fn create_collection_index(
 
 /// The collation of each compound result column. Every ephemeral index of the
 /// compound, including those of nested arms, uses it, as SQLite's
-/// multiSelectCollSeq does. A UNION ALL without ORDER BY compares no rows, so
-/// it has no collations, as SQLite builds them only for an ORDER BY or a merge
-/// (select.c multiSelectByMergeKeyInfo).
+/// multiSelectCollSeq does.
 fn compound_collations(
     left: &[(SelectPlan, CompoundOperator)],
     right_most: &SelectPlan,
-    has_order_by: bool,
     resolver: &Resolver,
-) -> crate::Result<Vec<CollationSeq>> {
+) -> crate::Result<CompoundCollations> {
     let arms: Vec<&SelectPlan> = left
         .iter()
         .map(|(select, _)| select)
@@ -851,16 +851,24 @@ fn compound_collations(
             resolver.schema(),
         )?;
     }
-    let compares_rows = has_order_by
-        || left
-            .iter()
-            .any(|(_, operator)| !matches!(operator, CompoundOperator::UnionAll));
-    if !compares_rows {
-        return Ok(Vec::new());
+    Ok(CompoundCollations(
+        columns
+            .map(|column| compound_column_collation(&arms, column, resolver))
+            .collect(),
+    ))
+}
+
+/// The collations of a compound's result columns, or the error that refuses to
+/// compare a column's values, as for jsonb. Only code that opens an ephemeral
+/// index reads them, so a compound that compares no rows, a UNION ALL without
+/// ORDER BY, is not refused. SQLite also builds the key of a compound only
+/// where it compares rows (select.c multiSelectOrderBy).
+struct CompoundCollations(crate::Result<Vec<CollationSeq>>);
+
+impl CompoundCollations {
+    fn get(&self) -> crate::Result<&[CollationSeq]> {
+        self.0.as_deref().map_err(LimboError::clone)
     }
-    columns
-        .map(|column| compound_column_collation(&arms, column, resolver))
-        .collect()
 }
 
 /// Emits bytecode for sorting compound select results and outputting them.

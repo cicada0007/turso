@@ -147,6 +147,15 @@ expect @tursopg error {
     cannot compare values of type jsonb
 }
 
+test union-all-of-jsonb-keeps-every-row {
+    CREATE TABLE c (id int, j jsonb);
+    INSERT INTO c VALUES (1, '{"a":1,"b":2}'), (2, '{"b":2,"a":1}');
+    SELECT count(*) FROM (SELECT j FROM c UNION ALL SELECT j FROM c) AS u;
+}
+expect {
+    4
+}
+
 test union-of-time-and-string-literal {
     CREATE TABLE a (id int, tm time);
     INSERT INTO a VALUES (1, '09:30'), (2, '23:59:59');
