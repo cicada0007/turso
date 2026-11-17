@@ -1794,7 +1794,7 @@ impl ProgramState {
         pager: &Arc<Pager>,
         write: bool,
     ) -> IOResultOr<()> {
-        let in_explicit_txn = !connection.auto_commit.load(Ordering::SeqCst);
+        let in_explicit_txn = !connection.get_auto_commit();
         if write && in_explicit_txn {
             // Check if MVCC is active - if so, use MVCC savepoints instead of pager savepoints
             if let Some(mv_store) = connection.mv_store().as_ref() {
@@ -3144,7 +3144,7 @@ impl Program {
                 self.connection
                     .add_total_changes(program_state.n_total_change.load(Ordering::SeqCst));
             }
-            let transaction_finished = self.connection.auto_commit.load(Ordering::SeqCst)
+            let transaction_finished = self.connection.get_auto_commit()
                 && self.connection.get_tx_state() == TransactionState::None;
             if transaction_finished {
                 // Finalize the in-memory TEMP schema only when the outer
@@ -3169,7 +3169,7 @@ impl Program {
         rollback: bool,
     ) -> IOResultOr<()> {
         let connection = self.connection.clone();
-        let auto_commit = connection.auto_commit.load(Ordering::SeqCst);
+        let auto_commit = connection.get_auto_commit();
         let tx_state = connection.get_tx_state();
         tracing::debug!(
             "Halt auto_commit {}, commit_state={:?}, tx_state={:?}",
@@ -3267,7 +3267,7 @@ impl Program {
         rollback: bool,
     ) -> IOResultOr<()> {
         let conn = self.connection.clone();
-        let auto_commit = conn.auto_commit.load(Ordering::SeqCst);
+        let auto_commit = conn.get_auto_commit();
         if !auto_commit {
             return Ok(IOResult::Done(()));
         }
@@ -3634,20 +3634,16 @@ impl Program {
             .cleanup_abandoned_mvcc_commit(&self.connection);
 
         // ParseSchema owns a nested helper statement on this connection and
-        // stores `auto_commit=false` for its duration. If the program aborts
-        // while that state is live (error mid-schema-row), release it here:
-        // restore the saved auto_commit and drop the inner statement so its
-        // nested guard is released BEFORE the `is_nested_stmt()` check below.
-        // Otherwise this top-level statement misclassifies itself as nested,
-        // skips transaction rollback, and leaks the DDL's exclusive MVCC tx
-        // (and the cleared auto_commit) into subsequent statements — which
-        // then appear to succeed without ever committing.
-        if let Some(inner) = state.active_op_state.take_parse_schema_if_active() {
-            self.connection
-                .auto_commit
-                .store(inner.previous_auto_commit(), Ordering::SeqCst);
-            drop(inner);
-        }
+        // keeps the connection out of autocommit for its duration. If the
+        // program aborts while that state is live (error mid-schema-row),
+        // drop it here, which drops the inner statement and returns to
+        // autocommit, so the nested guard is released BEFORE the
+        // `is_nested_stmt()` check below. Otherwise this top-level statement
+        // misclassifies itself as nested, skips transaction rollback, and
+        // leaks the DDL's exclusive MVCC tx (and the open transaction) into
+        // subsequent statements — which then appear to succeed without ever
+        // committing.
+        drop(state.active_op_state.take_parse_schema_if_active());
 
         // VACUUM (and VACUUM INTO) state can own internal helper statements whose drop path
         // releases nested guards. Clean it before checking whether this program

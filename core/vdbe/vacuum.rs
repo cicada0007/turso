@@ -1879,7 +1879,7 @@ fn vacuum_in_place_step(
         match phase {
             VacuumInPlacePhase::Preflight => {
                 // 1. Must be in auto-commit mode (no explicit transaction).
-                if !connection.auto_commit.load(Ordering::SeqCst) {
+                if !connection.get_auto_commit() {
                     return Err(LimboError::TxError(
                         "cannot VACUUM from within a transaction".to_string(),
                     )
@@ -1970,7 +1970,7 @@ fn vacuum_in_place_step(
                 // Checkpoint lock was already acquired in Preflight.
                 match source_pager.begin_vacuum_blocking_tx()? {
                     crate::IOResult::Done(()) => {
-                        connection.auto_commit.store(false, Ordering::SeqCst);
+                        connection.begin_engine_transaction();
                         connection.set_tx_state(crate::connection::TransactionState::Write {
                             schema_did_change: false,
                         });

@@ -461,6 +461,41 @@ impl StorageStatsRead {
     }
 }
 
+/// Who has the connection's transaction open. Outside autocommit, a statement
+/// that finishes does not commit.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum TxnOwner {
+    /// No transaction is open: each statement commits its own.
+    #[default]
+    Autocommit,
+    /// `BEGIN`, a `SAVEPOINT` outside a transaction, or `wal_insert_begin`.
+    /// `began` is PostgreSQL's `now()` for the whole transaction.
+    User { began: crate::WallClockInstant },
+    /// A transaction the engine runs for itself, such as reading the schema
+    /// back or `VACUUM`.
+    Engine,
+}
+
+/// Keeps [`TxnOwner`] private to this module while `Database` builds the
+/// connection with `Default::default()`.
+#[derive(Default)]
+pub(super) struct TxnOwnerCell(RwLock<TxnOwner>);
+
+/// Returned by [`Connection::keep_transaction_open`]. Dropping it returns the
+/// connection to autocommit if that call is what left autocommit.
+pub(crate) struct KeptOpenTransaction {
+    connection: Arc<Connection>,
+    began_here: bool,
+}
+
+impl Drop for KeptOpenTransaction {
+    fn drop(&mut self) {
+        if self.began_here {
+            self.connection.end_transaction();
+        }
+    }
+}
+
 /// Database connection handle.
 ///
 /// If you add a setting that affects SQL compilation or execution, call
@@ -475,11 +510,7 @@ pub struct Connection {
     /// Per-database schema cache (database_index -> schema)
     /// Loaded lazily to avoid copying all schemas on connection open
     pub(super) database_schemas: RwLock<HashMap<usize, Arc<Schema>>>,
-    /// Whether to automatically commit transaction
-    pub(crate) auto_commit: AtomicBool,
-    /// When the open user transaction began: PostgreSQL's `now()`. `None` when
-    /// no user transaction is open.
-    pub(super) transaction_time: RwLock<Option<crate::WallClockInstant>>,
+    pub(super) txn_owner: TxnOwnerCell,
     pub(super) transaction_state: AtomicTransactionState,
     /// True when an unfinished write statement inside an explicit transaction
     /// was reset or dropped and there was no statement savepoint to undo only
@@ -2545,7 +2576,7 @@ impl Connection {
         self.set_tx_state(TransactionState::Write {
             schema_did_change: false,
         });
-        self.begin_user_transaction(pager.io.current_time_wall_clock());
+        self.begin_user_transaction();
 
         Ok(())
     }
@@ -3113,34 +3144,55 @@ impl Connection {
     }
 
     pub fn get_auto_commit(&self) -> bool {
-        self.auto_commit.load(Ordering::SeqCst)
+        *self.txn_owner.0.read() == TxnOwner::Autocommit
     }
 
-    /// Leaves autocommit for a transaction the user began at `start`: `BEGIN`,
-    /// a `SAVEPOINT` outside a transaction, `wal_insert_begin`, or a
-    /// transaction that the failure of a sequence's inner transaction ended
-    /// too early.
-    pub(crate) fn begin_user_transaction(&self, start: crate::WallClockInstant) {
-        *self.transaction_time.write() = Some(start);
-        self.auto_commit.store(false, Ordering::SeqCst);
+    /// Leaves autocommit for a transaction the user began: `BEGIN`, a
+    /// `SAVEPOINT` outside a transaction, or `wal_insert_begin`.
+    pub(crate) fn begin_user_transaction(&self) {
+        let began = self.db.io.current_time_wall_clock();
+        *self.txn_owner.0.write() = TxnOwner::User { began };
+    }
+
+    /// Leaves autocommit for a transaction the engine runs for itself, which
+    /// [`Self::end_transaction`] ends.
+    pub(crate) fn begin_engine_transaction(&self) {
+        let mut owner = self.txn_owner.0.write();
+        turso_assert!(
+            *owner == TxnOwner::Autocommit,
+            "the engine began a transaction of its own inside another one"
+        );
+        *owner = TxnOwner::Engine;
+    }
+
+    /// Keeps the connection out of autocommit until the returned value is
+    /// dropped, so that statements run inside another statement, such as
+    /// ParseSchema's read of the schema table, do not commit its transaction.
+    pub(crate) fn keep_transaction_open(self: &Arc<Self>) -> KeptOpenTransaction {
+        let mut owner = self.txn_owner.0.write();
+        let began_here = *owner == TxnOwner::Autocommit;
+        if began_here {
+            *owner = TxnOwner::Engine;
+        }
+        KeptOpenTransaction {
+            connection: self.clone(),
+            began_here,
+        }
     }
 
     /// Returns to autocommit at the end of a transaction.
     pub(crate) fn end_transaction(&self) {
-        *self.transaction_time.write() = None;
-        self.auto_commit.store(true, Ordering::SeqCst);
+        *self.txn_owner.0.write() = TxnOwner::Autocommit;
     }
 
     /// When the open user transaction began. `None` in autocommit, where each
     /// statement is its own transaction, and in the transactions the engine
-    /// runs for itself, such as reading the schema back or `VACUUM`.
+    /// runs for itself.
     pub(crate) fn transaction_time(&self) -> Option<crate::WallClockInstant> {
-        let start = *self.transaction_time.read();
-        turso_assert!(
-            start.is_none() || !self.get_auto_commit(),
-            "a transaction returned to autocommit without clearing its start time"
-        );
-        start
+        match *self.txn_owner.0.read() {
+            TxnOwner::User { began } => Some(began),
+            TxnOwner::Autocommit | TxnOwner::Engine => None,
+        }
     }
 
     /// Mark the active explicit transaction poisoned so COMMIT rolls it back.

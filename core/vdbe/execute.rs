@@ -547,7 +547,7 @@ pub fn op_checkpoint(
     // Like SQLite, refuse only when this connection's open transaction has already
     // read or written the database. After a plain BEGIN nothing is held yet, so the
     // checkpoint runs. The error does not end the transaction.
-    if !program.connection.auto_commit.load(Ordering::SeqCst)
+    if !program.connection.get_auto_commit()
         && (pager.holds_read_lock()
             || pager.holds_write_lock()
             || program.connection.get_mv_tx_for_db(*database).is_some())
@@ -3602,7 +3602,7 @@ pub fn halt(
 ) -> InsnResult {
     state.halt_in_progress = true;
     let mv_store = state.mv_store(&program.connection).cloned();
-    let auto_commit = program.connection.auto_commit.load(Ordering::SeqCst);
+    let auto_commit = program.connection.get_auto_commit();
     // halt() runs while the statement is still stepping, so it is always
     // counted in n_active_root_statements here.
     let can_autocommit_now = state.can_autocommit_now(&program.connection, true);
@@ -5088,7 +5088,7 @@ pub fn op_transaction_inner(
             }
             OpTransactionState::BeginStatement => {
                 let needs_stmt_journal = program.needs_stmt_subtransactions.load(Ordering::Relaxed);
-                let auto_commit = program.connection.auto_commit.load(Ordering::SeqCst);
+                let auto_commit = program.connection.get_auto_commit();
                 let in_explicit_txn = !auto_commit;
                 if needs_stmt_journal {
                     if is_main_db {
@@ -5240,7 +5240,7 @@ pub fn op_auto_commit(
     let mv_store = program.connection.mv_store();
     let conn = program.connection.clone();
     let fk_on = conn.foreign_keys_enabled();
-    let had_autocommit = conn.auto_commit.load(Ordering::SeqCst); // true, not in tx
+    let had_autocommit = conn.get_auto_commit(); // true, not in tx
 
     // Drive any multi-step commit/rollback that's already in progress.
     // This handles main DB commits (Committing), attached DB commits
@@ -5389,7 +5389,7 @@ pub fn op_auto_commit(
                 // Write: set by Transaction opcode for BEGIN IMMEDIATE/EXCLUSIVE; leave as-is.
                 // Read: a SELECT in autocommit mode is still open; leave as-is — the
                 //       next write inside the explicit transaction will upgrade to Write.
-                conn.begin_user_transaction(pager.io.current_time_wall_clock());
+                conn.begin_user_transaction();
                 conn.set_tx_read_only(*read_only);
                 return Ok(InsnFunctionStepResult::Done);
             }
@@ -5515,7 +5515,7 @@ pub fn op_savepoint(
             }
             conn.with_savepoint_schema_snapshot(
                 |main_schema_snapshot, temp_schema_snapshot, staged_schema_snapshot| {
-                    let starts_transaction = conn.auto_commit.load(Ordering::SeqCst);
+                    let starts_transaction = conn.get_auto_commit();
                     let deferred_fk_violations = conn.get_deferred_foreign_key_violations();
 
                     if let Some(mv_store) = mv_store.as_ref() {
@@ -5617,7 +5617,7 @@ pub fn op_savepoint(
                             !conn.tx_is_poisoned(),
                             "rollback-only marker leaked outside an explicit transaction"
                         );
-                        conn.begin_user_transaction(pager.io.current_time_wall_clock());
+                        conn.begin_user_transaction();
                     }
 
                     state.pc += 1;
@@ -14673,18 +14673,12 @@ pub struct OpParseSchemaInner {
     materialized_view_info: crate::HashMap<String, crate::schema::StoredMaterializedView>,
     trigger_target_database_id: Option<usize>,
     db: usize,
-    previous_auto_commit: bool,
+    /// Declared after `stmt`, so the nested statement is dropped before the
+    /// connection can return to autocommit.
+    _transaction: crate::connection::KeptOpenTransaction,
 }
 
 pub type OpParseSchemaState = Option<Box<OpParseSchemaInner>>;
-
-impl OpParseSchemaInner {
-    /// The connection's `auto_commit` value saved at ParseSchema entry, so
-    /// abort paths can restore it when the op never reached its Done arm.
-    pub(crate) fn previous_auto_commit(&self) -> bool {
-        self.previous_auto_commit
-    }
-}
 
 pub fn op_parse_schema(
     program: &Program,
@@ -14708,10 +14702,9 @@ pub fn op_parse_schema(
         return op_parse_schema_step(state, &conn);
     }
 
-    // set auto commit to false in order for parse schema to not commit changes as transaction state is stored in connection,
-    // and we use the same connection for nested query.
-    let previous_auto_commit = conn.auto_commit.load(Ordering::SeqCst);
-    conn.auto_commit.store(false, Ordering::SeqCst);
+    // The nested query runs on this connection, so it must not commit the
+    // transaction of the statement that changed the schema.
+    let transaction = conn.keep_transaction_open();
 
     // For attached databases, qualify the sqlite_schema table with the database name
     let schema_table = if *db != crate::MAIN_DB_ID {
@@ -14755,8 +14748,6 @@ pub fn op_parse_schema(
         let fallback_schema = {
             let attached_dbs = conn.attached_databases.read();
             let Some(entry) = attached_dbs.index_to_data.get(db) else {
-                conn.auto_commit
-                    .store(previous_auto_commit, Ordering::SeqCst);
                 return Err(LimboError::InternalError(format!(
                     "stale reference to detached database (index {db})"
                 ))
@@ -14786,7 +14777,7 @@ pub fn op_parse_schema(
         materialized_view_info: Default::default(),
         trigger_target_database_id: *trigger_target_database_id,
         db: *db,
-        previous_auto_commit,
+        _transaction: transaction,
     }));
 
     // Now begin stepping through the schema rows
@@ -14863,7 +14854,7 @@ fn op_parse_schema_step(state: &mut ProgramState, conn: &Arc<Connection>) -> Ins
                     materialized_view_info,
                     trigger_target_database_id: _,
                     db,
-                    previous_auto_commit,
+                    _transaction: transaction,
                 } = *state
                     .active_op_state
                     .parse_schema()
@@ -14909,8 +14900,7 @@ fn op_parse_schema_step(state: &mut ProgramState, conn: &Arc<Connection>) -> Ins
                     *conn.schema.write() = schema_arc;
                 }
                 drop(stmt);
-                conn.auto_commit
-                    .store(previous_auto_commit, Ordering::SeqCst);
+                drop(transaction);
                 populate_result?;
 
                 state.pc += 1;
@@ -14918,33 +14908,11 @@ fn op_parse_schema_step(state: &mut ProgramState, conn: &Arc<Connection>) -> Ins
                 return Ok(InsnFunctionStepResult::Step);
             }
             StepResult::Interrupt => {
-                let OpParseSchemaInner {
-                    stmt,
-                    previous_auto_commit,
-                    ..
-                } = *state
-                    .active_op_state
-                    .parse_schema()
-                    .take()
-                    .expect("parse schema state should exist");
-                drop(stmt);
-                conn.auto_commit
-                    .store(previous_auto_commit, Ordering::SeqCst);
+                state.active_op_state.clear();
                 return Err(LimboError::Interrupt.into());
             }
             StepResult::Busy => {
-                let OpParseSchemaInner {
-                    stmt,
-                    previous_auto_commit,
-                    ..
-                } = *state
-                    .active_op_state
-                    .parse_schema()
-                    .take()
-                    .expect("parse schema state should exist");
-                drop(stmt);
-                conn.auto_commit
-                    .store(previous_auto_commit, Ordering::SeqCst);
+                state.active_op_state.clear();
                 return Err(LimboError::Busy.into());
             }
         }
@@ -19189,7 +19157,7 @@ fn op_vacuum_into_inner(program: &Program, state: &mut ProgramState, insn: &Insn
             VacuumIntoOpPhase::Init => {
                 // Check if we're in a transaction
                 // as vacuum cannot be run inside a transaction
-                if !program.connection.auto_commit.load(Ordering::SeqCst) {
+                if !program.connection.get_auto_commit() {
                     return Err(LimboError::TxError(
                         "cannot VACUUM INTO from within a transaction".to_string(),
                     )

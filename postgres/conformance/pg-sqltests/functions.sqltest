@@ -1696,6 +1696,21 @@ expect {
     1
 }
 
+test creating-a-table-in-a-transaction-keeps-its-time {
+    CREATE TABLE stamps (ts timestamptz);
+    BEGIN;
+    INSERT INTO stamps VALUES (now());
+    CREATE TABLE created_in_transaction (n int);
+    INSERT INTO stamps VALUES (now());
+    SELECT (now() = transaction_timestamp())::int, (now() < statement_timestamp())::int;
+    COMMIT;
+    SELECT count(DISTINCT ts) FROM stamps;
+}
+expect {
+    1|1
+    1
+}
+
 test time-keywords-are-casts-of-now {
     SELECT (current_timestamp = now())::int,
            (current_date = now()::date)::int,

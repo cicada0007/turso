@@ -1136,7 +1136,7 @@ pub fn call_builtin_scalar(
             }
         }
         ScalarFunc::IsAutocommit => {
-            let auto_commit = connection.auto_commit.load(Ordering::SeqCst);
+            let auto_commit = connection.get_auto_commit();
             Ok(Value::from_i64(if auto_commit { 1 } else { 0 }))
         }
         ScalarFunc::SequenceWatermark => {
