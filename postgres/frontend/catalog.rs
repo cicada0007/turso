@@ -231,6 +231,14 @@ impl Dialect for PostgresDialect {
         if name.eq_ignore_ascii_case("random") {
             return Ok(None);
         }
+        // date_part returns double precision, which tursopg prints differently
+        // from PostgreSQL (#10695): 2024.0 where PostgreSQL prints 2024.
+        if name.eq_ignore_ascii_case("date_part") {
+            return Err(crate::error::sqlstate_error(
+                turso_pg_parser::sqlstate::SQLSTATE_FEATURE_NOT_SUPPORTED,
+                "date_part is not supported; use extract, which returns the same field as numeric",
+            ));
+        }
         // CURRENT_TIMESTAMP and the other time keywords read now().
         if turso_pg_parser::translator::is_time_keyword_function(name) {
             turso_core::dialect::engine::check_scalar_arity(&ScalarFunc::Now, name, arg_count)?;

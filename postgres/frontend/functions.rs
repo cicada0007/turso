@@ -53,6 +53,7 @@ macro_rules! scalar_functions {
 
 pub(crate) fn register_functions(options: OpenOptions) -> OpenOptions {
     let options = register_scalar_functions(options);
+    let options = crate::datetime_functions::register_datetime_functions(options);
     options.extension_function(
         pg_scalar_function(
             "array_to_json",
@@ -1428,7 +1429,7 @@ fn exec_pg_get_expr(args: &[Register]) -> Result<Option<String>> {
 
 /// The error of PostgreSQL for a call with arguments of types that no
 /// function of this name accepts.
-fn undefined_function(name: &str, arg_types: &[&str]) -> LimboError {
+pub(crate) fn undefined_function(name: &str, arg_types: &[&str]) -> LimboError {
     sqlstate_error(
         SQLSTATE_UNDEFINED_FUNCTION,
         format!("function {name}({}) does not exist", arg_types.join(", ")),

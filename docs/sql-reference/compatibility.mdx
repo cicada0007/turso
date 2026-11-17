@@ -119,4 +119,30 @@ These raise an error:
 | `CURRENT_TIME` | Its type, `time with time zone`, is not supported |
 | A precision, as in `CURRENT_TIMESTAMP(0)` | Rounding the time is not supported |
 | `to_char` of a date or time | Formatting dates and times is not supported |
-| `make_date`, `make_timestamp`, `to_timestamp` | The [time extension](/docs/sql-reference/extensions#time-extension) is not loaded |
+| `make_timestamp`, `to_timestamp` | The [time extension](/docs/sql-reference/extensions#time-extension) is not loaded |
+
+`extract(field FROM x)`, `date_trunc(unit, x)` and `make_date(year, month, day)`
+work as in PostgreSQL for `x` of type `date`, `time`, `timestamp` and
+`timestamptz`:
+
+```sql
+SELECT extract(epoch FROM timestamptz '2024-02-29 10:30:15.5+00');  -- 1709202615.500000
+SELECT date_trunc('week', timestamp '2024-02-29 10:30:00');         -- 2024-02-26 00:00:00
+SELECT make_date(2024, 2, 29) + 1;                                  -- 2024-03-01
+```
+
+The fields are `year`, `month`, `day`, `hour`, `minute`, `second`,
+`milliseconds`, `microseconds`, `epoch`, `dow`, `isodow`, `doy`, `week`,
+`quarter`, `isoyear`, `decade`, `century` and `millennium`, with PostgreSQL's
+abbreviations. These raise an error with SQLSTATE `0A000`:
+
+| Call | Why |
+|------|-----|
+| `date_part` | Its result, `double precision`, is printed differently from PostgreSQL; use `extract` |
+| An argument that is a string constant, `NULL` or parameter, as in `extract(year FROM '2024-01-05')` or `make_date('2024', 1, 5)` | Write the type: `extract(year FROM date '2024-01-05')` |
+| A `date_trunc` unit that is not a string constant | Not supported |
+| The fields `julian`, `timezone`, `timezone_hour` and `timezone_minute` | Not supported |
+| `date_trunc` of a `time` | Its result, an `interval`, is not supported |
+| A result before year 1 or after year 9999, as in `make_date(-44, 3, 15)` or `date_trunc('decade', date '0005-01-01')` | Dates outside years 1 to 9999 are not supported |
+
+A `CHECK` constraint that calls `extract`, `date_trunc` or `make_date` is refused with SQLSTATE `42601`. Wrap the call in a `CAST` to give its type.

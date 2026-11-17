@@ -1,0 +1,699 @@
+# extract, date_part, date_trunc and make_date over date, time, timestamp and
+# timestamptz. The session time zone is UTC on both servers.
+#
+# tursopg stores only years 1 to 9999, so it refuses with 0A000 the calls whose
+# PostgreSQL result is outside that range or is a type it doesn't have.
+
+@database :memory:
+
+test extract-every-field-of-a-date {
+    CREATE TABLE ed (v date);
+    INSERT INTO ed VALUES ('2024-02-29'), ('0001-01-01'), ('9999-12-31'), ('2000-01-01'), ('1999-12-31'), ('2021-01-03'), ('1970-01-01');
+    SELECT v, extract(year from v), extract(month from v), extract(day from v),
+        extract(epoch from v), extract(dow from v), extract(isodow from v),
+        extract(doy from v), extract(week from v), extract(quarter from v),
+        extract(isoyear from v), extract(decade from v), extract(century from v),
+        extract(millennium from v)
+    FROM ed ORDER BY v;
+}
+expect {
+    0001-01-01|1|1|1|-62135596800|1|1|1|1|1|1|0|1|1
+    1970-01-01|1970|1|1|0|4|4|1|1|1|1970|197|20|2
+    1999-12-31|1999|12|31|946598400|5|5|365|52|4|1999|199|20|2
+    2000-01-01|2000|1|1|946684800|6|6|1|52|1|1999|200|20|2
+    2021-01-03|2021|1|3|1609632000|0|7|3|53|1|2020|202|21|3
+    2024-02-29|2024|2|29|1709164800|4|4|60|9|1|2024|202|21|3
+    9999-12-31|9999|12|31|253402214400|5|5|365|52|4|9999|999|100|10
+}
+
+test extract-date-fields-of-a-timestamp {
+    CREATE TABLE ets (v timestamp);
+    INSERT INTO ets VALUES ('2024-02-29 23:59:59.999999'), ('0001-01-01 00:00:00'), ('9999-12-31 23:59:59.999999'), ('1969-12-31 23:59:59.5'), ('2021-01-03 12:00:00');
+    SELECT v, extract(year from v), extract(month from v), extract(day from v),
+        extract(dow from v), extract(isodow from v), extract(doy from v),
+        extract(week from v), extract(quarter from v), extract(isoyear from v),
+        extract(decade from v), extract(century from v), extract(millennium from v)
+    FROM ets ORDER BY v;
+}
+expect {
+    0001-01-01 00:00:00|1|1|1|1|1|1|1|1|1|0|1|1
+    1969-12-31 23:59:59.5|1969|12|31|3|3|365|1|4|1970|196|20|2
+    2021-01-03 12:00:00|2021|1|3|0|7|3|53|1|2020|202|21|3
+    2024-02-29 23:59:59.999999|2024|2|29|4|4|60|9|1|2024|202|21|3
+    9999-12-31 23:59:59.999999|9999|12|31|5|5|365|52|4|9999|999|100|10
+}
+
+test extract-time-fields-of-a-timestamp {
+    CREATE TABLE ets2 (v timestamp);
+    INSERT INTO ets2 VALUES ('2024-02-29 23:59:59.999999'), ('0001-01-01 00:00:00'), ('9999-12-31 23:59:59.999999'), ('1969-12-31 23:59:59.5'), ('2024-01-05 10:00:00');
+    SELECT v, extract(hour from v), extract(minute from v), extract(second from v),
+        extract(milliseconds from v), extract(microseconds from v), extract(epoch from v)
+    FROM ets2 ORDER BY v;
+}
+expect {
+    0001-01-01 00:00:00|0|0|0.000000|0.000|0|-62135596800.000000
+    1969-12-31 23:59:59.5|23|59|59.500000|59500.000|59500000|-0.500000
+    2024-01-05 10:00:00|10|0|0.000000|0.000|0|1704448800.000000
+    2024-02-29 23:59:59.999999|23|59|59.999999|59999.999|59999999|1709251199.999999
+    9999-12-31 23:59:59.999999|23|59|59.999999|59999.999|59999999|253402300799.999999
+}
+
+# The last row is 2024-03-01 01:30 UTC, so its fields are of the UTC time.
+test extract-date-fields-of-a-timestamptz {
+    CREATE TABLE etz (v timestamptz);
+    INSERT INTO etz VALUES ('0001-01-01 00:00:00+00'), ('9999-12-31 23:59:59.999999+00'), ('1969-12-31 23:59:59.5+00'), ('2024-02-29 23:30:00-02');
+    SELECT v, extract(year from v), extract(month from v), extract(day from v),
+        extract(dow from v), extract(isodow from v), extract(doy from v),
+        extract(week from v), extract(quarter from v), extract(isoyear from v),
+        extract(decade from v), extract(century from v), extract(millennium from v)
+    FROM etz ORDER BY v;
+}
+expect {
+    0001-01-01 00:00:00+00|1|1|1|1|1|1|1|1|1|0|1|1
+    1969-12-31 23:59:59.5+00|1969|12|31|3|3|365|1|4|1970|196|20|2
+    2024-03-01 01:30:00+00|2024|3|1|5|5|61|9|1|2024|202|21|3
+    9999-12-31 23:59:59.999999+00|9999|12|31|5|5|365|52|4|9999|999|100|10
+}
+
+test extract-time-fields-of-a-timestamptz {
+    CREATE TABLE etz2 (v timestamptz);
+    INSERT INTO etz2 VALUES ('0001-01-01 00:00:00+00'), ('9999-12-31 23:59:59.999999+00'), ('1969-12-31 23:59:59.5+00'), ('2024-02-29 23:30:00-02');
+    SELECT v, extract(hour from v), extract(minute from v), extract(second from v),
+        extract(milliseconds from v), extract(microseconds from v), extract(epoch from v)
+    FROM etz2 ORDER BY v;
+}
+expect {
+    0001-01-01 00:00:00+00|0|0|0.000000|0.000|0|-62135596800.000000
+    1969-12-31 23:59:59.5+00|23|59|59.500000|59500.000|59500000|-0.500000
+    2024-03-01 01:30:00+00|1|30|0.000000|0.000|0|1709256600.000000
+    9999-12-31 23:59:59.999999+00|23|59|59.999999|59999.999|59999999|253402300799.999999
+}
+
+test extract-every-field-of-a-time {
+    CREATE TABLE et (v time);
+    INSERT INTO et VALUES ('00:00:00'), ('24:00:00'), ('23:59:59.999999'), ('10:30:15.5'), ('10:30:15.000001');
+    SELECT v, extract(hour from v), extract(minute from v), extract(second from v),
+        extract(milliseconds from v), extract(microseconds from v), extract(epoch from v)
+    FROM et ORDER BY v;
+}
+expect {
+    00:00:00|0|0|0.000000|0.000|0|0.000000
+    10:30:15.000001|10|30|15.000001|15000.001|15000001|37815.000001
+    10:30:15.5|10|30|15.500000|15500.000|15500000|37815.500000
+    23:59:59.999999|23|59|59.999999|59999.999|59999999|86399.999999
+    24:00:00|24|0|0.000000|0.000|0|86400.000000
+}
+
+# extract returns numeric. second and epoch have six decimal places, except the
+# epoch of a date, which has none.
+test extract-is-numeric-that-keeps-its-scale {
+    CREATE TABLE es (ts timestamp, d date);
+    INSERT INTO es VALUES ('2024-01-05 10:00:15.5', '2024-01-05');
+    SELECT extract(second from ts) + 1, extract(second from ts) * 2,
+        extract(epoch from ts) - 1, extract(epoch from d) + 1,
+        extract(year from d) + 1
+    FROM es;
+}
+expect {
+    16.500000|31.000000|1704448814.500000|1704412801|2025
+}
+
+# Units are case-insensitive, have abbreviations, and only their first ten
+# characters count.
+test extract-unit-spellings {
+    CREATE TABLE eu (ts timestamp);
+    INSERT INTO eu VALUES ('2024-05-05 10:30:15.123456');
+    SELECT extract('YEAR' from ts), extract(Year from ts), extract("year" from ts),
+        extract(yrs from ts), extract(mon from ts), extract(qtr from ts),
+        extract(w from ts), extract(d from ts), extract(h from ts), extract(m from ts),
+        extract(mm from ts), extract(MiNuTeS from ts), extract(secs from ts),
+        extract(msec from ts), extract(millisecondsxyz from ts), extract(usec from ts),
+        extract(cent from ts), extract(mils from ts), extract(decs from ts)
+    FROM eu;
+}
+expect {
+    2024|2024|2024|2024|5|2|18|5|10|30|30|30|15.123456|15123.456|15123.456|15123456|21|3|202
+}
+
+test extract-in-a-comparison {
+    CREATE TABLE ec (d date);
+    INSERT INTO ec VALUES ('2024-01-05'), ('2024-12-31'), ('2023-12-31');
+    SELECT count(*) FROM ec WHERE extract(year from d) = 2024;
+}
+expect {
+    2
+}
+
+test extract-of-null-is-null {
+    CREATE TABLE en (d date);
+    INSERT INTO en VALUES (NULL);
+    SELECT (extract(year from d) IS NULL)::int, (extract(epoch from NULL::timestamptz) IS NULL)::int FROM en;
+}
+expect {
+    1|1
+}
+
+test extract-hour-of-a-date-is-not-supported {
+    SELECT extract(hour from date '2024-02-29');
+}
+@sqlstate 0A000
+expect error {
+    unit "hour" not supported for type date
+}
+
+test extract-year-of-a-time-is-not-supported {
+    SELECT extract(year from time '10:30:00');
+}
+@sqlstate 0A000
+expect error {
+    unit "year" not supported for type time without time zone
+}
+
+test extract-of-a-reserved-word-is-not-supported {
+    SELECT extract('+infinity' from timestamp '2024-01-05 10:00:00');
+}
+@sqlstate 0A000
+expect error {
+    unit "\+infinity" not supported for type timestamp without time zone
+}
+
+# For time, PostgreSQL reports a reserved word as not recognized.
+test extract-of-a-reserved-word-of-a-time-is-not-recognized {
+    SELECT extract(now from time '10:30:00');
+}
+@sqlstate 22023
+expect error {
+    unit "now" not recognized for type time without time zone
+}
+
+test extract-of-an-unknown-unit-is-not-recognized {
+    SELECT extract(foo from date '2024-02-29');
+}
+@sqlstate 22023
+expect error {
+    unit "foo" not recognized for type date
+}
+
+test extract-of-a-unit-past-ten-characters-is-not-recognized {
+    SELECT extract(yearsxyzabc from timestamp '2024-01-05 10:00:00');
+}
+@sqlstate 22023
+expect error {
+    unit "yearsxyzabc" not recognized for type timestamp without time zone
+}
+
+test extract-timezone-of-a-timestamp-is-not-supported {
+    SELECT extract(timezone from timestamp '2024-01-05 10:00:00');
+}
+@sqlstate 0A000
+expect error {
+    unit "timezone" not supported for type timestamp without time zone
+}
+
+test extract-timezone-of-a-timestamptz-is-not-supported {
+    SELECT extract(timezone from timestamptz '2024-01-05 10:00:00+00');
+}
+expect {
+    0
+}
+@sqlstate 0A000
+expect @tursopg error {
+    unit "timezone" not supported for type timestamp with time zone
+}
+
+test extract-timezone-hour-is-not-supported {
+    SELECT extract(timezone_hour from timestamptz '2024-01-05 10:00:00+00');
+}
+expect {
+    0
+}
+@sqlstate 0A000
+expect @tursopg error {
+    unit "timezone_hour" not supported for type timestamp with time zone
+}
+
+test extract-timezone-minute-is-not-supported {
+    SELECT extract(timezone_minute from timestamptz '2024-01-05 10:00:00+00');
+}
+expect {
+    0
+}
+@sqlstate 0A000
+expect @tursopg error {
+    unit "timezone_minute" not supported for type timestamp with time zone
+}
+
+test extract-julian-is-not-supported {
+    SELECT extract(julian from date '2024-02-29');
+}
+expect {
+    2460370
+}
+@sqlstate 0A000
+expect @tursopg error {
+    unit "julian" not supported for type date
+}
+
+test extract-of-a-string-constant-is-not-supported {
+    SELECT extract(year from '2024-01-05');
+}
+@sqlstate 0A000
+expect error {
+    pg_catalog\.extract needs a value of a stated type
+}
+@sqlstate 42725
+expect @postgres error {
+    function pg_catalog\.extract\(unknown, unknown\) is not unique
+}
+
+test extract-of-null-without-a-type-is-not-supported {
+    SELECT extract(year from NULL);
+}
+@sqlstate 0A000
+expect error {
+    pg_catalog\.extract needs a value of a stated type
+}
+@sqlstate 42725
+expect @postgres error {
+    function pg_catalog\.extract\(unknown, unknown\) is not unique
+}
+
+test extract-of-an-integer-does-not-exist {
+    SELECT extract(year from 5);
+}
+@sqlstate 42883
+expect error {
+    function pg_catalog\.extract\(unknown, integer\) does not exist
+}
+
+test extract-of-text-does-not-exist {
+    SELECT extract(year from CAST('2024-01-05' AS text));
+}
+@sqlstate 42883
+expect error {
+    function pg_catalog\.extract\(unknown, text\) does not exist
+}
+
+# date_part returns double precision, which tursopg prints differently (#10695).
+test date-part-is-not-supported {
+    SELECT date_part('year', date '2024-02-29');
+}
+expect {
+    2024
+}
+@sqlstate 0A000
+expect @tursopg error {
+    date_part is not supported
+}
+
+test date-trunc-of-a-timestamp {
+    CREATE TABLE dts (v timestamp);
+    INSERT INTO dts VALUES ('2024-02-29 23:59:59.999999'), ('9999-12-31 23:59:59.999999'), ('2021-01-03 10:30:15.123456');
+    SELECT v, date_trunc('microseconds', v), date_trunc('milliseconds', v),
+        date_trunc('second', v), date_trunc('minute', v), date_trunc('hour', v),
+        date_trunc('day', v), date_trunc('week', v), date_trunc('month', v),
+        date_trunc('quarter', v), date_trunc('year', v), date_trunc('decade', v),
+        date_trunc('century', v), date_trunc('millennium', v)
+    FROM dts ORDER BY v;
+}
+expect {
+    2021-01-03 10:30:15.123456|2021-01-03 10:30:15.123456|2021-01-03 10:30:15.123|2021-01-03 10:30:15|2021-01-03 10:30:00|2021-01-03 10:00:00|2021-01-03 00:00:00|2020-12-28 00:00:00|2021-01-01 00:00:00|2021-01-01 00:00:00|2021-01-01 00:00:00|2020-01-01 00:00:00|2001-01-01 00:00:00|2001-01-01 00:00:00
+    2024-02-29 23:59:59.999999|2024-02-29 23:59:59.999999|2024-02-29 23:59:59.999|2024-02-29 23:59:59|2024-02-29 23:59:00|2024-02-29 23:00:00|2024-02-29 00:00:00|2024-02-26 00:00:00|2024-02-01 00:00:00|2024-01-01 00:00:00|2024-01-01 00:00:00|2020-01-01 00:00:00|2001-01-01 00:00:00|2001-01-01 00:00:00
+    9999-12-31 23:59:59.999999|9999-12-31 23:59:59.999999|9999-12-31 23:59:59.999|9999-12-31 23:59:59|9999-12-31 23:59:00|9999-12-31 23:00:00|9999-12-31 00:00:00|9999-12-27 00:00:00|9999-12-01 00:00:00|9999-10-01 00:00:00|9999-01-01 00:00:00|9990-01-01 00:00:00|9901-01-01 00:00:00|9001-01-01 00:00:00
+}
+
+# The first row is 2024-02-29 23:30 UTC, so it truncates to February.
+test date-trunc-of-a-timestamptz {
+    CREATE TABLE dtz (v timestamptz);
+    INSERT INTO dtz VALUES ('2024-02-29 23:59:59.999999+00'), ('9999-12-31 23:59:59.999999+00'), ('2024-03-01 01:30:00+02');
+    SELECT v, date_trunc('microseconds', v), date_trunc('milliseconds', v),
+        date_trunc('second', v), date_trunc('minute', v), date_trunc('hour', v),
+        date_trunc('day', v), date_trunc('week', v), date_trunc('month', v),
+        date_trunc('quarter', v), date_trunc('year', v), date_trunc('decade', v),
+        date_trunc('century', v), date_trunc('millennium', v)
+    FROM dtz ORDER BY v;
+}
+expect {
+    2024-02-29 23:30:00+00|2024-02-29 23:30:00+00|2024-02-29 23:30:00+00|2024-02-29 23:30:00+00|2024-02-29 23:30:00+00|2024-02-29 23:00:00+00|2024-02-29 00:00:00+00|2024-02-26 00:00:00+00|2024-02-01 00:00:00+00|2024-01-01 00:00:00+00|2024-01-01 00:00:00+00|2020-01-01 00:00:00+00|2001-01-01 00:00:00+00|2001-01-01 00:00:00+00
+    2024-02-29 23:59:59.999999+00|2024-02-29 23:59:59.999999+00|2024-02-29 23:59:59.999+00|2024-02-29 23:59:59+00|2024-02-29 23:59:00+00|2024-02-29 23:00:00+00|2024-02-29 00:00:00+00|2024-02-26 00:00:00+00|2024-02-01 00:00:00+00|2024-01-01 00:00:00+00|2024-01-01 00:00:00+00|2020-01-01 00:00:00+00|2001-01-01 00:00:00+00|2001-01-01 00:00:00+00
+    9999-12-31 23:59:59.999999+00|9999-12-31 23:59:59.999999+00|9999-12-31 23:59:59.999+00|9999-12-31 23:59:59+00|9999-12-31 23:59:00+00|9999-12-31 23:00:00+00|9999-12-31 00:00:00+00|9999-12-27 00:00:00+00|9999-12-01 00:00:00+00|9999-10-01 00:00:00+00|9999-01-01 00:00:00+00|9990-01-01 00:00:00+00|9901-01-01 00:00:00+00|9001-01-01 00:00:00+00
+}
+
+# Centuries and millennia start in years ending in 01.
+test date-trunc-of-a-date-is-a-timestamptz {
+    CREATE TABLE dtd (v date);
+    INSERT INTO dtd VALUES ('2024-02-29'), ('9999-12-31'), ('0100-12-31'), ('0101-01-01'), ('2000-06-01'), ('2001-01-01');
+    SELECT v, date_trunc('hour', v), date_trunc('day', v), date_trunc('week', v),
+        date_trunc('month', v), date_trunc('quarter', v), date_trunc('year', v),
+        date_trunc('decade', v), date_trunc('century', v), date_trunc('millennium', v)
+    FROM dtd ORDER BY v;
+}
+expect {
+    0100-12-31|0100-12-31 00:00:00+00|0100-12-31 00:00:00+00|0100-12-27 00:00:00+00|0100-12-01 00:00:00+00|0100-10-01 00:00:00+00|0100-01-01 00:00:00+00|0100-01-01 00:00:00+00|0001-01-01 00:00:00+00|0001-01-01 00:00:00+00
+    0101-01-01|0101-01-01 00:00:00+00|0101-01-01 00:00:00+00|0100-12-27 00:00:00+00|0101-01-01 00:00:00+00|0101-01-01 00:00:00+00|0101-01-01 00:00:00+00|0100-01-01 00:00:00+00|0101-01-01 00:00:00+00|0001-01-01 00:00:00+00
+    2000-06-01|2000-06-01 00:00:00+00|2000-06-01 00:00:00+00|2000-05-29 00:00:00+00|2000-06-01 00:00:00+00|2000-04-01 00:00:00+00|2000-01-01 00:00:00+00|2000-01-01 00:00:00+00|1901-01-01 00:00:00+00|1001-01-01 00:00:00+00
+    2001-01-01|2001-01-01 00:00:00+00|2001-01-01 00:00:00+00|2001-01-01 00:00:00+00|2001-01-01 00:00:00+00|2001-01-01 00:00:00+00|2001-01-01 00:00:00+00|2000-01-01 00:00:00+00|2001-01-01 00:00:00+00|2001-01-01 00:00:00+00
+    2024-02-29|2024-02-29 00:00:00+00|2024-02-29 00:00:00+00|2024-02-26 00:00:00+00|2024-02-01 00:00:00+00|2024-01-01 00:00:00+00|2024-01-01 00:00:00+00|2020-01-01 00:00:00+00|2001-01-01 00:00:00+00|2001-01-01 00:00:00+00
+    9999-12-31|9999-12-31 00:00:00+00|9999-12-31 00:00:00+00|9999-12-27 00:00:00+00|9999-12-01 00:00:00+00|9999-10-01 00:00:00+00|9999-01-01 00:00:00+00|9990-01-01 00:00:00+00|9901-01-01 00:00:00+00|9001-01-01 00:00:00+00
+}
+
+test date-trunc-of-year-one {
+    CREATE TABLE dt1 (d date, ts timestamp);
+    INSERT INTO dt1 VALUES ('0005-03-04', '0001-01-01 10:00:00');
+    SELECT date_trunc('week', d), date_trunc('year', d), date_trunc('century', d),
+        date_trunc('millennium', d), date_trunc('day', ts), date_trunc('week', ts)
+    FROM dt1;
+}
+expect {
+    0005-02-28 00:00:00+00|0005-01-01 00:00:00+00|0001-01-01 00:00:00+00|0001-01-01 00:00:00+00|0001-01-01 00:00:00|0001-01-01 00:00:00
+}
+
+test date-trunc-in-a-comparison {
+    CREATE TABLE dc (ts timestamp);
+    INSERT INTO dc VALUES ('2024-01-05 10:00:00'), ('2024-01-05 23:59:59.999999'), ('2024-01-06 00:00:00');
+    SELECT count(*) FROM dc WHERE date_trunc('day', ts) = timestamp '2024-01-05';
+}
+expect {
+    2
+}
+
+test date-trunc-of-null-is-null {
+    CREATE TABLE dn (ts timestamp);
+    INSERT INTO dn VALUES (NULL);
+    SELECT (date_trunc('day', ts) IS NULL)::int FROM dn;
+}
+expect {
+    1
+}
+
+# date_trunc accepts only the units of an interval, so not dow or epoch.
+test date-trunc-to-dow-is-not-recognized {
+    SELECT date_trunc('dow', timestamp '2024-01-05 10:00:00');
+}
+@sqlstate 22023
+expect error {
+    unit "dow" not recognized for type timestamp without time zone
+}
+
+test date-trunc-of-a-date-names-timestamptz-in-errors {
+    SELECT date_trunc('foo', date '2024-01-05');
+}
+@sqlstate 22023
+expect error {
+    unit "foo" not recognized for type timestamp with time zone
+}
+
+test date-trunc-to-timezone-is-not-supported {
+    SELECT date_trunc('timezone', timestamp '2024-01-05 10:00:00');
+}
+@sqlstate 0A000
+expect error {
+    unit "timezone" not supported for type timestamp without time zone
+}
+
+# PostgreSQL returns an interval, which tursopg doesn't have.
+test date-trunc-of-a-time-is-not-supported {
+    SELECT date_trunc('hour', time '10:30:00');
+}
+expect {
+    10:00:00
+}
+@sqlstate 0A000
+expect @tursopg error {
+    date_trunc of a time is not supported
+}
+
+# The decade of years 1 to 9 starts in 1 BC.
+test date-trunc-to-a-decade-before-year-ten-is-not-supported {
+    SELECT date_trunc('decade', date '0005-03-04');
+}
+expect {
+    0001-01-01 00:00:00+00 BC
+}
+@sqlstate 0A000
+expect @tursopg error {
+    date_trunc\('decade'\) of a year before 10 gives a year BC
+}
+
+test date-trunc-of-a-unit-that-is-not-a-constant-is-not-supported {
+    CREATE TABLE du (u text, ts timestamp);
+    INSERT INTO du VALUES ('day', '2024-01-05 10:00:00');
+    SELECT date_trunc(u, ts) FROM du;
+}
+expect {
+    2024-01-05 00:00:00
+}
+@sqlstate 0A000
+expect @tursopg error {
+    date_trunc needs a string constant as its unit
+}
+
+test date-trunc-of-a-null-unit-is-not-supported {
+    SELECT date_trunc(NULL, timestamp '2024-01-05 10:00:00');
+}
+expect {
+
+}
+@sqlstate 0A000
+expect @tursopg error {
+    date_trunc needs a string constant as its unit
+}
+
+test date-trunc-of-a-case-unit-without-else-is-not-supported {
+    SELECT date_trunc(CASE WHEN false THEN 'day' END, timestamp '2024-01-05 10:00:00');
+}
+expect {
+
+}
+@sqlstate 0A000
+expect @tursopg error {
+    date_trunc needs a string constant as its unit
+}
+
+test date-trunc-of-a-nullif-unit-is-not-supported {
+    SELECT date_trunc(nullif('day', 'day'), timestamp '2024-01-05 10:00:00');
+}
+expect {
+
+}
+@sqlstate 0A000
+expect @tursopg error {
+    date_trunc needs a string constant as its unit
+}
+
+test date-trunc-of-a-coalesce-unit-is-not-supported {
+    SELECT date_trunc(coalesce(NULL, 'day'), timestamp '2024-01-05 10:00:00');
+}
+expect {
+    2024-01-05 00:00:00
+}
+@sqlstate 0A000
+expect @tursopg error {
+    date_trunc needs a string constant as its unit
+}
+
+test date-trunc-of-a-subquery-unit-is-not-supported {
+    SELECT date_trunc((SELECT 'day'), timestamp '2024-01-05 10:00:00');
+}
+expect {
+    2024-01-05 00:00:00
+}
+@sqlstate 0A000
+expect @tursopg error {
+    date_trunc needs a string constant as its unit
+}
+
+test date-trunc-of-a-string-constant-is-not-supported {
+    SELECT date_trunc('day', '2024-01-05');
+}
+@sqlstate 0A000
+expect error {
+    date_trunc needs a value of a stated type
+}
+@sqlstate 42725
+expect @postgres error {
+    function date_trunc\(unknown, unknown\) is not unique
+}
+
+test date-trunc-of-an-integer-does-not-exist {
+    SELECT date_trunc('day', 5);
+}
+@sqlstate 42883
+expect error {
+    function date_trunc\(unknown, integer\) does not exist
+}
+
+test make-date-from-integers {
+    CREATE TABLE md (y int, m int, d int);
+    INSERT INTO md VALUES (2024, 2, 29), (1, 1, 1), (9999, 12, 31), (2024, 1, 5);
+    SELECT make_date(y, m, d) FROM md ORDER BY y, m;
+}
+expect {
+    0001-01-01
+    2024-01-05
+    2024-02-29
+    9999-12-31
+}
+
+test make-date-is-a-date {
+    SELECT make_date(2024, 2, 29) + 1, (make_date(2024, 2, 29) = date '2024-02-29')::int;
+}
+expect {
+    2024-03-01|1
+}
+
+test make-date-of-null-is-null {
+    CREATE TABLE mn (y int);
+    INSERT INTO mn VALUES (NULL);
+    SELECT (make_date(y, 1, 5) IS NULL)::int, (make_date(2024, y, 5) IS NULL)::int, (make_date(2024, 1, y) IS NULL)::int FROM mn;
+}
+expect {
+    1|1|1
+}
+
+test make-date-of-a-day-past-the-month-is-out-of-range {
+    SELECT make_date(2023, 2, 29);
+}
+@sqlstate 22008
+expect error {
+    date field value out of range: 2023-02-29
+}
+
+test make-date-of-month-thirteen-is-out-of-range {
+    SELECT make_date(2024, 13, 1);
+}
+@sqlstate 22008
+expect error {
+    date field value out of range: 2024-13-01
+}
+
+test make-date-of-year-zero-is-out-of-range {
+    SELECT make_date(0, 1, 1);
+}
+@sqlstate 22008
+expect error {
+    date field value out of range: 0-01-01
+}
+
+test make-date-past-the-last-date-is-out-of-range {
+    SELECT make_date(2147483647, 1, 1);
+}
+@sqlstate 22008
+expect error {
+    date out of range: 2147483647-01-01
+}
+
+test make-date-before-the-first-date-is-out-of-range {
+    SELECT make_date(-4714, 11, 23);
+}
+@sqlstate 22008
+expect error {
+    date out of range: -4713-11-23
+}
+
+test make-date-of-a-year-bc-is-not-supported {
+    SELECT make_date(-1, 1, 1);
+}
+expect {
+    0001-01-01 BC
+}
+@sqlstate 0A000
+expect @tursopg error {
+    make_date of year -1 is not supported
+}
+
+test make-date-of-year-10000-is-not-supported {
+    SELECT make_date(10000, 1, 1);
+}
+expect {
+    10000-01-01
+}
+@sqlstate 0A000
+expect @tursopg error {
+    make_date of year 10000 is not supported
+}
+
+test make-date-of-a-string-constant-is-not-supported {
+    SELECT make_date('2024', 1, 1);
+}
+expect {
+    2024-01-01
+}
+@sqlstate 0A000
+expect @tursopg error {
+    make_date needs integer values of a stated type
+}
+
+test make-date-of-null-without-a-type-is-not-supported {
+    SELECT make_date(NULL, 1, 1);
+}
+expect {
+
+}
+@sqlstate 0A000
+expect @tursopg error {
+    make_date needs integer values of a stated type
+}
+
+test make-date-of-a-bigint-does-not-exist {
+    SELECT make_date(CAST(2024 AS bigint), 1, 1);
+}
+@sqlstate 42883
+expect error {
+    function make_date\(bigint, integer, integer\) does not exist
+}
+
+# tursopg doesn't check integer overflow in the addition, so make_date reports
+# it instead.
+test make-date-of-an-integer-overflow-is-out-of-range {
+    CREATE TABLE mo (y int);
+    INSERT INTO mo VALUES (2024);
+    SELECT make_date(y + 2147483647, 1, 1) FROM mo;
+}
+@sqlstate 22003
+expect error {
+    integer out of range
+}
+
+# Past 64 bits, tursopg's integer arithmetic gives a float.
+test make-date-of-an-integer-overflow-past-64-bits-is-out-of-range {
+    CREATE TABLE mf (y int);
+    INSERT INTO mf VALUES (2024);
+    SELECT make_date(y * 2147483647 * 2147483647 * 4, 1, 1) FROM mf;
+}
+@sqlstate 22003
+expect error {
+    integer out of range
+}
+
+# A CHECK constraint is typed by its own typer, which can't tell a string
+# literal from text (#11902).
+test a-check-constraint-calling-date-trunc-is-not-supported {
+    CREATE TABLE ck (ts timestamp CHECK (date_trunc('day', ts) = ts));
+    INSERT INTO ck VALUES ('2024-01-05');
+    SELECT count(*) FROM ck;
+}
+expect {
+    1
+}
+@sqlstate 42601
+expect @tursopg error {
+    cannot determine return type of function date_trunc\(\) in CHECK constraint
+}
+
+test a-check-constraint-calling-date-trunc-inside-a-cast {
+    CREATE TABLE ckc (ts timestamp CHECK (CAST(date_trunc('day', ts) AS timestamp) = ts));
+    INSERT INTO ckc VALUES ('2024-01-05');
+    SELECT count(*) FROM ckc;
+}
+expect {
+    1
+}
+
+test a-check-constraint-calling-date-trunc-inside-a-cast-refuses-a-row {
+    CREATE TABLE ckr (ts timestamp CHECK (CAST(date_trunc('day', ts) AS timestamp) = ts));
+    INSERT INTO ckr VALUES ('2024-01-05 10:00:00');
+}
+expect error {
+    violates check constraint
+}
