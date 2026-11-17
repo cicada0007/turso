@@ -1438,12 +1438,6 @@ impl Statement {
     /// already handled trigger execution tracking. Only resets ProgramState
     /// fields so the subprogram can run again from the beginning.
     pub fn reset_for_subprogram_reuse(&mut self) {
-        // A subprogram that stopped inside `nextval` was aborted, and abort
-        // ends the sequence's inner transaction.
-        turso_assert!(
-            self.state.sequence_inner_tx_pending.is_none(),
-            "a trigger program is reused while a sequence's inner transaction is open"
-        );
         self.state.reset(None, None);
         self.state
             .n_change

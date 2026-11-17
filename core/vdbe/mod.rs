@@ -1509,12 +1509,12 @@ impl ProgramState {
         self.active_op_state.clear();
         self.seek_state = OpSeekState::Start;
         self.commit_state = CommitState::Ready;
-        // Drop any in-flight sequence inner-tx commit-state-machine. If
-        // it was mid-step the inner mv_tx has already been swapped back
-        // (we handle that on every code path inside
-        // `op_sequence_commit_inner_tx`) so dropping the state machine
-        // here only releases its references.
-        self.sequence_inner_commit = None;
+        // Abort ends nextval's transaction and its commit, and a statement
+        // that halts cleanly has already committed them.
+        turso_assert!(
+            self.sequence_inner_tx_pending.is_none() && self.sequence_inner_commit.is_none(),
+            "a statement is reset while nextval's transaction is open"
+        );
         self.op_vacuum_state = VacuumOpState::None;
         self.view_delta_state = ViewDeltaApplyState::NotStarted;
         self.populate_matviews_state = None;
