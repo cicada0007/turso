@@ -370,6 +370,11 @@ impl ClassCatalog {
                     "GRANT on a schema reached the relation catalog".to_string(),
                 ));
             }
+            CatalogChange::DropNamespace { .. } => {
+                return Err(LimboError::InternalError(
+                    "DROP SCHEMA reached the relation catalog".to_string(),
+                ));
+            }
         }
         Ok(())
     }
@@ -1043,6 +1048,11 @@ pub(crate) fn translate_catalog_changes(
             } => {
                 return Err(LimboError::InternalError(
                     "GRANT on a schema reached the relation catalog".to_string(),
+                ));
+            }
+            CatalogChange::DropNamespace { .. } => {
+                return Err(LimboError::InternalError(
+                    "DROP SCHEMA reached the relation catalog".to_string(),
                 ));
             }
         }
