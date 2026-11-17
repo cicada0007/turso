@@ -9,7 +9,9 @@ use turso_parser::ast;
 
 use super::custom_type_operators::find_operator_call;
 use super::get_expr_affinity;
-use crate::function::{AggFunc, Func, ResultType, ReturnType, ScalarFunc, WindowFunc};
+use crate::function::{
+    AggFunc, ArgumentType, ChooseResultType, Func, ResultType, ReturnType, ScalarFunc, WindowFunc,
+};
 use crate::schema::{BTreeTable, Column, Schema, Table, TypeDef};
 use crate::sync::Arc;
 use crate::translate::emitter::Resolver;
@@ -1099,6 +1101,7 @@ fn result_type(result_type: ResultType, args: &[Box<ast::Expr>], env: &TypeEnv) 
     let first_argument = || args.first().map(|arg| type_of(arg, env));
     match result_type {
         ResultType::Declared(return_type) => declared_return_type(return_type, args, env),
+        ResultType::ChosenFromArgumentTypes(choose) => chosen_result_type(choose, args, env),
         ResultType::FirstArgument => first_argument().unwrap_or(any),
         ResultType::OneOfTheArguments => common_type(args.iter().map(|arg| arg.as_ref()), env),
         ResultType::OneOfTheIifValues => common_type(iif_values(args).map(|arg| arg.as_ref()), env),
@@ -1151,6 +1154,51 @@ fn result_type(result_type: ResultType, args: &[Box<ast::Expr>], env: &TypeEnv) 
             _ => any,
         },
         ResultType::Unknown => any,
+    }
+}
+
+/// The type of a call to a function that chooses its result type from the
+/// types of its arguments. A call the function refuses is an error when it is
+/// translated, and has the type Unknown.
+fn chosen_result_type(
+    choose: ChooseResultType,
+    args: &[Box<ast::Expr>],
+    env: &TypeEnv,
+) -> ExprType {
+    let argument_types: Vec<ArgumentType> =
+        args.iter().map(|arg| argument_type(arg, env)).collect();
+    match choose(&argument_types) {
+        Ok(return_type) => declared_return_type(return_type, args, env),
+        Err(_) => ExprType::Unknown,
+    }
+}
+
+/// What a function that chooses its result type is told about an argument.
+pub(crate) fn argument_type(arg: &ast::Expr, env: &TypeEnv) -> ArgumentType {
+    match type_of(arg, env) {
+        ExprType::Untyped if matches!(arg, ast::Expr::Literal(ast::Literal::String(_))) => {
+            ArgumentType::StringLiteral
+        }
+        // A CASE, nullif or subquery made of string literals is also untyped
+        // here, but PostgreSQL gives it the type text.
+        ExprType::Untyped => ArgumentType::Unknown,
+        // `Any` is a value of no known type: a parameter, a column with no
+        // declared type, or a call whose result type isn't declared.
+        ExprType::Builtin(BuiltinType::Any)
+        | ExprType::Null
+        | ExprType::Unknown
+        | ExprType::NotKnownYet => ArgumentType::Unknown,
+        ty @ (ExprType::Custom { .. }
+        | ExprType::Array { .. }
+        | ExprType::RowValue
+        | ExprType::Builtin(
+            BuiltinType::Integer
+            | BuiltinType::Real
+            | BuiltinType::Decimal
+            | BuiltinType::Numeric
+            | BuiltinType::Text
+            | BuiltinType::Blob,
+        )) => ArgumentType::Typed(name_without_domains(ty, env.schema())),
     }
 }
 

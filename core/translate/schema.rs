@@ -485,6 +485,13 @@ fn resolve_func_return_type(
             Some(CheckExprType::CustomType(_)) | None => CheckExprType::Any,
         }),
         ResultType::ElementOfTheFirstArgument => Ok(CheckExprType::Any),
+        // The function needs to know which arguments are string literals,
+        // and this checker types them as text.
+        ResultType::ChosenFromArgumentTypes(_) => bail_parse_error!(
+            "cannot determine return type of function {}() in CHECK constraint; \
+             wrap with CAST to specify the type",
+            name
+        ),
         ResultType::Unknown if matches!(func, Func::External(_)) => {
             bail_parse_error!(
                 "cannot determine return type of function {}() in CHECK constraint; \
