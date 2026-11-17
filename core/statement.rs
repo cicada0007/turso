@@ -1469,8 +1469,13 @@ impl Statement {
     /// Lightweight reset for reusing a cached subprogram statement.
     /// Skips transaction handling and abort(): the caller (op_program) has
     /// already handled trigger execution tracking. Only resets ProgramState
-    /// fields so the subprogram can run again from the beginning.
+    /// fields so the subprogram can run again from the beginning, so the
+    /// previous run must have finished.
     pub fn reset_for_subprogram_reuse(&mut self) {
+        turso_assert!(
+            matches!(self.state.execution_state, ProgramExecutionState::Done),
+            "only a subprogram that finished is reused"
+        );
         self.state.reset(None, None);
         self.state
             .n_change

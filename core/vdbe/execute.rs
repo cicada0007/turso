@@ -6111,7 +6111,10 @@ pub fn op_program(
                 // same Program instruction (e.g. next row in an INSERT loop).
                 // Only cache on clean completion - aborted statements have dirty
                 // internal state and cannot be safely reused.
-                if !subprogram_aborted {
+                if matches!(
+                    statement.execution_state(),
+                    crate::vdbe::ProgramExecutionState::Done
+                ) {
                     let pc_key = state.pc as usize;
                     state.subprogram_stmt_cache.insert(pc_key, statement);
                 }

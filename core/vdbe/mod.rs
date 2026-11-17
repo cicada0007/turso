@@ -1121,17 +1121,16 @@ pub struct ProgramState {
     /// inner-tx. `Insn::SequenceCommitInnerTx` constructs this on first
     /// entry and drives it one step per opcode call, yielding
     /// `InsnFunctionStepResult::IO` between steps. Cleared on terminal
-    /// outcome (Done / Conflict / Err) and on statement reset.
+    /// outcome (Done / Conflict / Err) and when the statement aborts.
     pub sequence_inner_commit: Option<StateMachine<Box<MvccCommitStateMachine>>>,
     /// State for a pending sequence inner-tx wrap, set by
     /// `Insn::SequenceBeginInnerTx` (Wrapped path only) and cleared
     /// by `Insn::SequenceCommitInnerTx` on any terminal outcome.
-    /// Tracked here (rather than in registers) so that statement
-    /// reset can roll back an orphaned inner tx and restore the
-    /// connection's mv_tx — registers are wiped on reset, but the
-    /// orphaned inner would otherwise linger in `mv_store.txs` and
-    /// pollute the connection's mv_tx slot, breaking subsequent
-    /// commits with phantom dependencies.
+    /// Kept here rather than in registers so that a statement that
+    /// aborts can roll back the inner tx and put the connection's own
+    /// mv_tx back. Otherwise the inner tx would stay in
+    /// `mv_store.txs` and in the connection's mv_tx slot, and later
+    /// commits would depend on it.
     pub sequence_inner_tx_pending: Option<SequenceInnerTxState>,
     /// Consecutive conflict-retry count for the in-progress sequence
     /// inner-tx wrap. Incremented on each `WriteWriteConflict` /
