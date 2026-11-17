@@ -37,8 +37,8 @@ use turso_core::security::permission::{Action, Object, PermissionDenied};
 use turso_core::security::roles::RoleId;
 use turso_core::{
     emit_sqlite_sequence_row_read, emit_sqlite_sequence_row_write, to_u32, CatalogChange,
-    CmpInsFlags, CollationSeq, Connection, CursorType, InsertFlags, Insn, LimboError, NewOwner,
-    Numeric, ProgramBuilder, RegisterOrLiteral, Value,
+    CmpInsFlags, CollationSeq, Connection, CursorType, GrantTarget, InsertFlags, Insn, LimboError,
+    NewOwner, Numeric, ProgramBuilder, RegisterOrLiteral, Value,
 };
 use turso_parser::ast;
 
@@ -307,7 +307,8 @@ impl ClassCatalog {
                 }
             }
             CatalogChange::Grant {
-                namespace, name, ..
+                target: GrantTarget::Relation { namespace, name },
+                ..
             } => {
                 let [acl] = values else {
                     return Err(LimboError::InternalError(
@@ -359,6 +360,14 @@ impl ClassCatalog {
             CatalogChange::GrantRole { .. } => {
                 return Err(LimboError::InternalError(
                     "GRANT of role membership reached the relation catalog".to_string(),
+                ));
+            }
+            CatalogChange::Grant {
+                target: GrantTarget::Namespace(_),
+                ..
+            } => {
+                return Err(LimboError::InternalError(
+                    "GRANT on a schema reached the relation catalog".to_string(),
                 ));
             }
         }
@@ -836,8 +845,7 @@ pub(crate) fn translate_catalog_changes(
             }
             CatalogChange::Grant {
                 revoke,
-                namespace,
-                name,
+                target: GrantTarget::Relation { namespace, name },
                 privileges,
                 grantees,
             } => {
@@ -1027,6 +1035,14 @@ pub(crate) fn translate_catalog_changes(
             CatalogChange::GrantRole { .. } => {
                 return Err(LimboError::InternalError(
                     "GRANT of role membership reached the relation catalog".to_string(),
+                ));
+            }
+            CatalogChange::Grant {
+                target: GrantTarget::Namespace(_),
+                ..
+            } => {
+                return Err(LimboError::InternalError(
+                    "GRANT on a schema reached the relation catalog".to_string(),
                 ));
             }
         }
