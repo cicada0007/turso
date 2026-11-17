@@ -14296,15 +14296,12 @@ const SEQ_COMMIT_STATUS_CONFLICT_RETRY: i64 = 1;
 
 /// Saved outer mv_tx state, encoded in a register payload via a Blob.
 /// Format: 9 bytes — 8-byte little-endian u64 tx_id followed by 1-byte
-/// mode tag (0=Read, 1=Write/exclusive, 2=Concurrent). Empty Blob means
-/// "no prior mv_tx for this db" (must be restored to `None`).
+/// mode tag (0=Read, 1=Write/exclusive, 2=Concurrent). The skipped path
+/// writes an empty Blob instead.
 fn encode_saved_outer_mv_tx(
-    outer: Option<(TxID, crate::translate::emitter::TransactionMode)>,
+    (tx_id, mode): (TxID, crate::translate::emitter::TransactionMode),
 ) -> crate::ValueBlob {
     use crate::translate::emitter::TransactionMode;
-    let Some((tx_id, mode)) = outer else {
-        return crate::alloc::vec![];
-    };
     let mut buf = <crate::ValueBlob as TursoVecExt<u8>>::with_capacity(9);
     buf.extend_from_slice(&tx_id.to_le_bytes());
     let mode_tag: u8 = match mode {
@@ -14387,14 +14384,16 @@ pub fn op_sequence_begin_inner_tx(
         return Ok(InsnFunctionStepResult::Step);
     };
 
-    let outer_tx = conn.get_mv_tx_for_db(*db);
-    if let Some((outer_id, _)) = outer_tx {
-        if mv_store.is_exclusive_tx(&outer_id) {
-            state.registers[*path_kind_reg].set_value(Value::from_i64(SEQ_PATH_SKIPPED));
-            state.registers[*saved_outer_reg].set_value(Value::Blob(crate::alloc::vec![]));
-            state.pc += 1;
-            return Ok(InsnFunctionStepResult::Step);
-        }
+    // The statement's Transaction opcodes open a transaction on the
+    // sequence's database before nextval runs.
+    let outer_tx = conn
+        .get_mv_tx_for_db(*db)
+        .expect("nextval runs inside the statement's own transaction");
+    if mv_store.is_exclusive_tx(&outer_tx.0) {
+        state.registers[*path_kind_reg].set_value(Value::from_i64(SEQ_PATH_SKIPPED));
+        state.registers[*saved_outer_reg].set_value(Value::Blob(crate::alloc::vec![]));
+        state.pc += 1;
+        return Ok(InsnFunctionStepResult::Step);
     }
 
     let inner_tx_id = mv_store.begin_tx_with_schema_generation_and_checkpoint_read_guard(

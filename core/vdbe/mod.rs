@@ -1016,10 +1016,12 @@ impl Default for VacuumOpState {
 pub struct SequenceInnerTxState {
     pub db: usize,
     pub inner_tx_id: crate::mvcc::database::TxID,
-    pub saved_outer: Option<(
+    /// The statement's own transaction, which nextval's transaction
+    /// replaces in the connection's slot until it commits.
+    pub saved_outer: (
         crate::mvcc::database::TxID,
         crate::translate::emitter::TransactionMode,
-    )>,
+    ),
 }
 
 /// What a write statement's activity is measured against to tell whether it
@@ -3114,11 +3116,8 @@ impl Program {
     ) -> IOResultOr<()> {
         if !rollback {
             turso_assert!(
-                !matches!(
-                    program_state.sequence_inner_tx_pending.as_ref(),
-                    Some(pending) if pending.saved_outer.is_some()
-                ),
-                "cannot commit while a sequence inner tx has a saved outer user tx"
+                program_state.sequence_inner_tx_pending.is_none(),
+                "cannot commit while nextval's transaction is open"
             );
         }
 
@@ -4086,9 +4085,7 @@ impl Program {
                 );
             }
         }
-        let (outer_tx_id, outer_mode) = pending
-            .saved_outer
-            .expect("nextval runs inside the statement's own transaction");
+        let (outer_tx_id, outer_mode) = pending.saved_outer;
         turso_assert!(
             mv_store.is_tx_rollbackable(outer_tx_id),
             "the statement's own transaction ended while nextval's was open",
