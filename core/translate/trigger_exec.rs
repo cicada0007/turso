@@ -610,30 +610,7 @@ fn execute_trigger_commands(
     subprogram_builder.epilogue(resolver.schema());
     let built_subprogram =
         subprogram_builder.build(connection.clone(), true, "trigger subprogram")?;
-    let subprogram_prepared = built_subprogram.prepared();
-
-    // Trigger subprograms do not emit Transaction opcodes, so the parent statement
-    // must acquire any attached/temp database transactions the trigger body needs
-    // before OP_Program enters the subprogram.
-    for db_id in &subprogram_prepared.write_databases {
-        if db_id == crate::MAIN_DB_ID {
-            program.begin_write_operation()?;
-        } else {
-            let schema_cookie = resolver.with_schema(db_id, |s| s.schema_version);
-            program.begin_write_on_database(db_id, schema_cookie)?;
-        }
-    }
-    for db_id in &subprogram_prepared.read_databases {
-        if subprogram_prepared.write_databases.get(db_id) {
-            continue;
-        }
-        if db_id == crate::MAIN_DB_ID {
-            program.begin_read_operation()?;
-        } else {
-            let schema_cookie = resolver.with_schema(db_id, |s| s.schema_version);
-            program.begin_read_on_database(db_id, schema_cookie)?;
-        }
-    }
+    begin_subprogram_transactions(program, resolver, built_subprogram.prepared())?;
 
     // Build the param_registers Vec from the sparse allocator: maps each parameter
     // index to the parent register that holds the value.
@@ -670,6 +647,40 @@ fn execute_trigger_commands(
     });
 
     Ok(true)
+}
+
+/// Opens, in the statement that runs a trigger or foreign-key action
+/// subprogram, a transaction on every database the subprogram reads or
+/// writes. Subprograms emit no Transaction opcodes, so without this a
+/// subprogram that touches another database (an attached table, or
+/// `nextval` on an attached sequence) would run with no transaction there.
+/// SQLite records these databases on the top-level parse instead
+/// (build.c `sqlite3BeginWriteOperation`, `sqlite3CodeVerifySchemaAtToplevel`).
+pub(crate) fn begin_subprogram_transactions(
+    program: &mut ProgramBuilder,
+    resolver: &Resolver,
+    subprogram: &crate::vdbe::PreparedProgram,
+) -> Result<()> {
+    for db_id in &subprogram.write_databases {
+        if db_id == crate::MAIN_DB_ID {
+            program.begin_write_operation()?;
+        } else {
+            let schema_cookie = resolver.with_schema(db_id, |s| s.schema_version);
+            program.begin_write_on_database(db_id, schema_cookie)?;
+        }
+    }
+    for db_id in &subprogram.read_databases {
+        if subprogram.write_databases.get(db_id) {
+            continue;
+        }
+        if db_id == crate::MAIN_DB_ID {
+            program.begin_read_operation()?;
+        } else {
+            let schema_cookie = resolver.with_schema(db_id, |s| s.schema_version);
+            program.begin_read_on_database(db_id, schema_cookie)?;
+        }
+    }
+    Ok(())
 }
 
 /// Check if there are any triggers for a given event (regardless of time).

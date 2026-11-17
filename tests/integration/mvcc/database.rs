@@ -11455,6 +11455,49 @@ fn test_create_sequence_in_attached_mvcc_database() {
     }
 }
 
+/// A foreign-key action runs as a subprogram with no Transaction opcodes of
+/// its own. When it calls `nextval` on an attached sequence, the statement
+/// that deletes the parent row must open the attached database too.
+#[test]
+fn test_fk_set_default_calls_nextval_on_attached_sequence() {
+    let opts = DatabaseOpts::new().with_attach(true);
+    let db = MvccTestDbNoConn::new_with_random_db_with_opts(opts);
+    let aux_dir = tempfile::TempDir::new().unwrap();
+    let aux_path = aux_dir
+        .path()
+        .join(format!("aux_{}.db", rand::random::<u64>()));
+    let aux_path_str = aux_path.to_str().unwrap().to_string();
+    let conn = db.connect();
+    conn.execute(format!("ATTACH '{aux_path_str}' AS aux"))
+        .unwrap();
+    conn.execute("PRAGMA aux.journal_mode = 'experimental_mvcc'")
+        .unwrap();
+    conn.execute("CREATE SEQUENCE aux.s").unwrap();
+    conn.execute("CREATE TABLE p(id INTEGER PRIMARY KEY)")
+        .unwrap();
+    conn.execute(
+        "CREATE TABLE c(x INTEGER DEFAULT (nextval('aux.s')) REFERENCES p(id) ON DELETE SET DEFAULT)",
+    )
+    .unwrap();
+    conn.execute("PRAGMA foreign_keys = ON").unwrap();
+    conn.execute("INSERT INTO p VALUES (1), (2), (5), (6)")
+        .unwrap();
+    conn.execute("INSERT INTO c VALUES (5), (6)").unwrap();
+
+    // Autocommit: the write on aux is exclusive, so nextval runs inline.
+    conn.execute("DELETE FROM p WHERE id = 5").unwrap();
+    // BEGIN CONCURRENT: nextval runs in its own transaction on aux.
+    conn.execute("BEGIN CONCURRENT").unwrap();
+    conn.execute("DELETE FROM p WHERE id = 6").unwrap();
+    conn.execute("COMMIT").unwrap();
+
+    let rows = get_rows(&conn, "SELECT x FROM c ORDER BY x");
+    assert_eq!(
+        rows,
+        vec![vec![Value::from_i64(1)], vec![Value::from_i64(2)]]
+    );
+}
+
 /// Regression: a non-CYCLE `nextval` issued inside a `BEGIN CONCURRENT`
 /// transaction must never drive `op_sequence_commit_inner_tx` to retry.
 /// The autonomous inner tx is only allowed to absorb conflicts that
