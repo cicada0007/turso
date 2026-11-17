@@ -1781,6 +1781,7 @@ fn affinity_to_primitive(affinity: crate::vdbe::affinity::Affinity) -> Option<&'
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::security::roles::SessionRole;
     use crate::EngineDialect;
     use crate::{ConnectOpts, Database, DatabaseOpts, MemoryIO, OpenFlags, IO};
 
@@ -2144,7 +2145,7 @@ mod tests {
             None,
             Arc::new(EngineDialect),
         )?;
-        db.connect(ConnectOpts::new())
+        db.connect(ConnectOpts::new(SessionRole::Superuser))
     }
 
     /// A hash join inside a correlated subquery is built once and probed once per
